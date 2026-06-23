@@ -292,8 +292,8 @@ app.get('/api/subscription-audit', async (req, res, next) => {
  const force = req.query.refresh === '1';
  const months = Math.min(36, Math.max(1, Number(req.query.months ?? 16)));
  if (force) invalidateSubscriptionAuditCache();
- const data = await getCachedSubscriptionAudit(months);
- res.json({ cached: !force, ...data });
+ const { data, cached } = await withDurableCache(`subscription-audit:${months}`, 30 * 60 * 1000, () => getCachedSubscriptionAudit(months), () => true, force);
+ res.json({ cached, ...data });
  } catch (err) {
  next(err);
  }
@@ -308,27 +308,8 @@ app.get('/api/recurring-subscriptions', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
  const months = Math.min(36, Math.max(3, Number(req.query.months ?? 12)));
- if (
- !force
- && recurringCache
- && Date.now() - recurringCache.at < RECURRING_TTL_MS
- && recurringCache.data.lookbackMonths === months
- ) {
- res.json({ cached: true, ...recurringCache.data });
- return;
- }
- if (!recurringInFlight) {
- recurringInFlight = detectRecurringSubscriptions(months)
- .then((data) => {
- recurringCache = { at: Date.now(), data };
- return data;
- })
- .finally(() => {
- recurringInFlight = null;
- });
- }
- const data = await recurringInFlight;
- res.json({ cached: false, ...data });
+ const { data, cached } = await withDurableCache(`recurring-subscriptions:${months}`, RECURRING_TTL_MS, () => detectRecurringSubscriptions(months), () => true, force);
+ res.json({ cached, ...data });
  } catch (err) {
  next(err);
  }
@@ -786,9 +767,8 @@ app.get('/api/tiller-transactions', async (req, res, next) => {
 
 app.get('/api/reconciliation', async (req, res, next) => {
  try {
- const { getReconciliation, invalidateReconciliationCache } = await import('./tillerQbReco.js');
- if (req.query.refresh === '1') invalidateReconciliationCache();
- const data = await getReconciliation();
+ const { getReconciliation } = await import('./tillerQbReco.js');
+ const { data } = await withDurableCache('reconciliation', 30 * 60 * 1000, getReconciliation, () => true, req.query.refresh === '1');
  res.json(data);
  } catch (err) { next(err); }
 });
@@ -797,9 +777,8 @@ app.get('/api/reconciliation', async (req, res, next) => {
 // top-selling SKUs, unit prices, and customer breakdowns.
 app.get('/api/sales-by-product', async (req, res, next) => {
  try {
- const { getSalesByProduct, invalidateSalesByProductCache } = await import('./salesByProduct.js');
- if (req.query.refresh === '1') invalidateSalesByProductCache();
- const data = await getSalesByProduct();
+ const { getSalesByProduct } = await import('./salesByProduct.js');
+ const { data } = await withDurableCache('sales-by-product', 30 * 60 * 1000, getSalesByProduct, () => true, req.query.refresh === '1');
  res.json(data);
  } catch (err) { next(err); }
 });
@@ -884,22 +863,10 @@ let invInFlight: Promise<InventoryPurchasesResult> | null = null;
 app.get('/api/inventory-purchases', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- if (!force && invCache && Date.now() - invCache.at < INV_TTL_MS) {
- res.json({ cached: true, ...invCache.data });
- return;
- }
- if (!invInFlight) {
- invInFlight = getInventoryPurchases()
- .then((data) => {
- // Don't cache empty/zero results - usually means QBO 429 throttling
- // killed all per-account fetches. Better to retry on next request
- // than serve poisoned $0 cache for 5 min.
- if (data.total > 0) invCache = { at: Date.now(), data };
- return data;
- })
- .finally(() => { invInFlight = null; });
- }
- res.json({ cached: false, ...(await invInFlight) });
+ // isGood: only cache a non-zero total (a $0 usually means QBO 429 killed the
+ // per-account fetches - don't poison the cache with it).
+ const { data, cached } = await withDurableCache('inventory-purchases', INV_TTL_MS, getInventoryPurchases, (d) => d.total > 0, force);
+ res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
@@ -938,10 +905,11 @@ app.get('/api/upflow', async (req, res, next) => {
  } catch (err) { next(err); }
 });
 
-app.get('/api/sales-by-reps', async (_req, res, next) => {
+app.get('/api/sales-by-reps', async (req, res, next) => {
  try {
    const { getSalesByReps } = await import('./salesByReps.js');
-   res.json(await getSalesByReps());
+   const { data } = await withDurableCache('sales-by-reps', 30 * 60 * 1000, getSalesByReps, () => true, req.query.refresh === '1');
+   res.json(data);
  } catch (err) { next(err); }
 });
 
@@ -1061,33 +1029,8 @@ app.get('/api/expenses-mapped', async (req, res, next) => {
  const months = Math.min(36, Math.max(1, Number(req.query.months ?? 14)));
  const force = req.query.refresh === '1';
  if (force) invalidateMappedExpensesCache();
-
- // Combined is a derived view (PureX + Moysh) - no separate route cache.
- // Always re-compose from whatever PureX/Moysh have right now. Refresh on
- // Combined just clears the upstream caches above.
- if (entity === 'Combined') {
- const data = await getMappedExpenses('Combined', months);
- res.json({ cached: false, derived: 'PureX + Moysh', ...data });
- return;
- }
-
- const key = `${entity}|${months}`;
- const cached = mappedCache.get(key);
- if (!force && cached && Date.now() - cached.at < MAPPED_TTL_MS) {
- res.json({ cached: true, ...cached.data });
- return;
- }
- let p = mappedInFlight.get(key);
- if (!p) {
- p = getMappedExpenses(entity, months)
- .then((data) => {
- mappedCache.set(key, { at: Date.now(), data });
- return data;
- })
- .finally(() => { mappedInFlight.delete(key); });
- mappedInFlight.set(key, p);
- }
- res.json({ cached: false, ...(await p) });
+ const { data, cached } = await withDurableCache(`expenses-mapped:${entity}:${months}`, MAPPED_TTL_MS, () => getMappedExpenses(entity, months), () => true, force);
+ res.json({ cached, ...(entity === 'Combined' ? { derived: 'PureX + Moysh' } : {}), ...data });
  } catch (err) { next(err); }
 });
 
