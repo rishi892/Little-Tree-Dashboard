@@ -425,17 +425,16 @@ export function CashFlow13Week() {
    * Built from captured Monday snapshots (proj) + live-computed actuals
    * for each closed week. This replaces the broken "run forward-projection
    * algorithm on past dates" approach which produced $0 / dashes. */}
- {view === 'past' && (
+ {/* Past = the SAME budgeted schedule, just for the weeks that have elapsed
+   * (rendered by the budget block below with direction=past data). */}
+ {view === 'actual' && (
  <CurrentMonthOverviewSection data={monthOverview} />
  )}
- {view === 'past' && (
- <PastCashflowTable pastGrid={pastGrid} liveData={data} futureData={futureData} salesScenario={salesScenario} />
- )}
  {view === 'actual' && (
- <ActualCashflowTable pastGrid={pastGrid} />
+ <ActualCashflowTable budgetData={data} pastGrid={pastGrid} />
  )}
  {view === 'variance' && (
- <VarianceCashflowTable pastGrid={pastGrid} />
+ <VarianceCashflowTable budgetData={data} pastGrid={pastGrid} />
  )}
 
  {/* CC Utilisation editor removed - CC financing is no longer part of the 13-week plan. */}
@@ -447,7 +446,7 @@ export function CashFlow13Week() {
    * against a past window produces $0 / dashes that misrepresent history.
    * For past data the right artefacts are the captured Monday snapshots +
    * the actuals computed in the variance section above. */}
- {view === 'budgeted' && <>
+ {(view === 'budgeted' || view === 'past') && <>
  <div className="kpis" data-cfo-anchor="cf-kpis">
  <div className="kpi highlight">
  <div className="kpi-label">Wk 1 Opening Cash</div>
@@ -494,7 +493,7 @@ export function CashFlow13Week() {
  {weeks.map((w, i) => (
  <th key={i} className="num">
  <div style={{ fontSize: 11, fontWeight: 700 }}>{direction === 'past' ? `Wk -${i + 1}` : `Wk ${i + 1}`}</div>
- <div style={{ fontSize: 10, color: 'var(--muted)' }}>{w.label}</div>
+ <div style={{ fontSize: 10, color: 'var(--muted)' }}>{w.label} – {w.end.slice(5).replace('-', '/')}</div>
  </th>
  ))}
  <th className="num">13-wk total</th>
@@ -1335,128 +1334,166 @@ function EmptySection({ title, sub }: { title: string; sub: string }) {
   </div>
  );
 }
+// ---- actuals mapping ------------------------------------------------------
+// Map a budget INFLOW line to its actual counterpart for a week (AR collected
+// + sales invoiced - the same figures the current-month view pulls from QB).
+// Outflow / unmapped lines return null -> rendered as "entry yet to be done".
+function actualForInflowLine(label: string, a: WeekActuals): number | null {
+ if (/gelato/i.test(label)) return a.arActuals?.gelato?.amount ?? 0;
+ if (/little tree|non-gelato/i.test(label)) return a.arActuals?.nonGelato?.amount ?? 0;
+ if (/projected|new sales/i.test(label)) return a.salesInvoiced?.total ?? 0;
+ return null;
+}
 
 // ---- Actual (Past Weeks) --------------------------------------------------
-// Per closed week, the cash that REALLY moved - bank inflow/outflow (Tiller),
-// AR collected (Gelato + Little Tree) and sales invoiced (LT Financials). No
-// forecast here, just reality. Newest week on the left.
-function ActualCashflowTable({ pastGrid }: { pastGrid: PastWeeksGridResponse | null }) {
+// Same line-item layout as the Budgeted schedule, but each cell is the ACTUAL
+// pulled from QB / collections for that elapsed week. Where the entry isn't
+// booked yet it shows "entry yet to be done".
+function ActualCashflowTable({ budgetData, pastGrid }: { budgetData: Cashflow13; pastGrid: PastWeeksGridResponse | null }) {
  if (!pastGrid) return <LoadingSection title="Actual · what really happened" />;
- const items = pastGrid.items;
- if (items.length === 0) return <EmptySection title="Actual · what really happened" sub="No past weeks data." />;
+ const weeks = budgetData.weeks;
+ const byMonday = new Map(pastGrid.items.map((it) => [it.monday, it]));
  const fmt = (n: number) => formatCurrency(Math.round(n));
- const dash = <span style={{ color: 'var(--muted)' }}>-</span>;
- const show = (n: number | null | undefined) => (n === null || n === undefined || n === 0 ? dash : fmt(n));
- const rows: Array<{ label: string; sub?: string; get: (a: WeekActuals) => number | null; strong?: boolean; tone?: 'in' | 'out' }> = [
-  { label: 'Cash In (bank)', get: (a) => a.inflow, strong: true, tone: 'in' },
-  { label: '· AR collected — Gelato', get: (a) => a.arActuals?.gelato?.amount ?? null },
-  { label: '· AR collected — Little Tree', get: (a) => a.arActuals?.nonGelato?.amount ?? null },
-  { label: '· Sales invoiced', sub: 'new invoices issued in the week', get: (a) => a.salesInvoiced?.total ?? null },
-  { label: 'Cash Out (bank)', get: (a) => a.outflow, strong: true, tone: 'out' },
-  { label: 'Net change', get: (a) => a.netChange, strong: true },
-  { label: 'AR open at week-end', get: (a) => a.arOpenAtEnd?.amount ?? null },
- ];
+ const TBD = <span style={{ color: 'var(--muted)', fontStyle: 'italic', fontSize: 11 }}>entry yet to be done</span>;
+ const hdr = (w: Cashflow13['weeks'][number], i: number) => (
+  <th key={w.start} className="num">
+   <div>Wk -{i + 1}</div>
+   <div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}>{w.label} – {w.end.slice(5).replace('-', '/')}</div>
+  </th>
+ );
  return (
   <CollapsibleSection
-   title={`Actual · what really happened (${items.length} week${items.length === 1 ? '' : 's'})`}
-   sub={<>Real activity per closed week - bank cash in/out (Tiller), AR collected and sales invoiced (LT Financials). Newest week on the left.</>}
+   title="Actual · what really happened"
+   sub={<>Each elapsed week's real entries - sales invoiced + AR collected (pulled from QB / collections, like the current-month view). Outflow actuals aren't booked per category, so per-line outflows show <em>entry yet to be done</em>; the bank total appears on TOTAL OUTFLOWS.</>}
   >
    <div className="table-wrap">
     <table className="data-table" style={{ fontSize: 12 }}>
-     <thead>
-      <tr>
-       <th>Metric</th>
-       {items.map((it, i) => (
-        <th key={it.monday} className="num">
-         <div>Wk -{i + 1}</div>
-         <div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}>{it.monday.slice(5)}{!it.weekClosed && ' *'}</div>
-        </th>
-       ))}
-      </tr>
-     </thead>
+     <thead><tr><th>Line item</th>{weeks.map(hdr)}</tr></thead>
      <tbody>
-      {rows.map((r) => (
-       <tr key={r.label} className={r.strong ? 'total-row' : undefined}>
-        <td>{r.strong ? <strong>{r.label}</strong> : r.label}{r.sub && <div className="vendor-note">{r.sub}</div>}</td>
-        {items.map((it) => {
-         const v = it.actuals ? r.get(it.actuals) : null;
-         const color = v && r.tone === 'out' ? 'var(--danger)' : v && r.tone === 'in' ? '#059669' : undefined;
-         return <td key={it.monday} className="num" style={{ color }}>{show(v)}</td>;
+      <tr>
+       <td><strong>Opening cash</strong></td>
+       {weeks.map((w) => { const it = byMonday.get(w.start); return <td key={w.start} className="num">{it?.snapshot ? fmt(it.snapshot.openingCash) : TBD}</td>; })}
+      </tr>
+      <tr><td colSpan={1 + weeks.length} style={{ background: 'var(--accent-soft)', fontWeight: 700, color: '#059669' }}>CASH INFLOWS</td></tr>
+      {budgetData.inflows.map((line) => (
+       <tr key={`in-${line.label}`}>
+        <td>{line.label}</td>
+        {weeks.map((w) => {
+         const a = byMonday.get(w.start)?.actuals ?? null;
+         const v = a ? actualForInflowLine(line.label, a) : null;
+         return <td key={w.start} className="num">{a && v !== null ? fmt(v) : TBD}</td>;
         })}
        </tr>
       ))}
+      <tr className="total-row">
+       <td>TOTAL INFLOWS</td>
+       {weeks.map((w) => {
+        const a = byMonday.get(w.start)?.actuals ?? null;
+        return <td key={w.start} className="num">{a ? fmt((a.arActuals?.total ?? 0) + (a.salesInvoiced?.total ?? 0)) : TBD}</td>;
+       })}
+      </tr>
+      <tr><td colSpan={1 + weeks.length} style={{ background: 'var(--danger-soft)', fontWeight: 700, color: 'var(--danger)' }}>CASH OUTFLOWS</td></tr>
+      {budgetData.outflows.map((line) => (
+       <tr key={`out-${line.label}`}>
+        <td>{line.label}</td>
+        {weeks.map((w) => <td key={w.start} className="num">{TBD}</td>)}
+       </tr>
+      ))}
+      <tr className="total-row">
+       <td>TOTAL OUTFLOWS <span className="vendor-note">bank debits</span></td>
+       {weeks.map((w) => { const a = byMonday.get(w.start)?.actuals ?? null; return <td key={w.start} className="num">{a ? fmt(a.outflow) : TBD}</td>; })}
+      </tr>
+      <tr className="total-row">
+       <td><strong>NET CHANGE</strong></td>
+       {weeks.map((w) => {
+        const a = byMonday.get(w.start)?.actuals ?? null;
+        return <td key={w.start} className="num">{a ? <strong style={{ color: a.netChange >= 0 ? '#059669' : 'var(--danger)' }}>{a.netChange >= 0 ? '+' : ''}{fmt(a.netChange)}</strong> : TBD}</td>;
+       })}
+      </tr>
      </tbody>
     </table>
    </div>
-   <div className="vendor-note" style={{ marginTop: 8 }}>* current in-progress week — actuals are running totals capped at today.</div>
   </CollapsibleSection>
  );
 }
 
 // ---- Variance (Past Weeks) ------------------------------------------------
-// Budget (forecast we froze that Monday) vs Actual, week by week, for the
-// headline totals. The Δ is what to scan - where reality diverged from plan.
-function VarianceCashflowTable({ pastGrid }: { pastGrid: PastWeeksGridResponse | null }) {
+// Same line-item layout: each cell is budget (the plan for that week) over
+// actual over Δ. Lines with no booked actual show "entry yet to be done".
+function VarianceCashflowTable({ budgetData, pastGrid }: { budgetData: Cashflow13; pastGrid: PastWeeksGridResponse | null }) {
  if (!pastGrid) return <LoadingSection title="Variance · budget vs actual" />;
- const items = pastGrid.items;
- if (items.length === 0) return <EmptySection title="Variance · budget vs actual" sub="No past weeks data." />;
+ const weeks = budgetData.weeks;
+ const byMonday = new Map(pastGrid.items.map((it) => [it.monday, it]));
  const fmt = (n: number) => formatCurrency(Math.round(n));
- const vcell = (budget: number | null, actual: number | null, lowerIsBetter = false): React.ReactNode => {
-  const hasB = budget !== null && budget !== 0;
-  const hasA = actual !== null && actual !== 0;
-  if (!hasB && !hasA) return <span style={{ color: 'var(--muted)' }}>-</span>;
-  const b = budget ?? 0;
+ const vcell = (budget: number, actual: number | null, lowerIsBetter = false): React.ReactNode => {
   if (actual === null) {
-   return <div style={{ lineHeight: 1.25 }}><div style={{ fontSize: 10, color: 'var(--muted)' }}>budget {fmt(b)}</div><div className="vendor-note">actual pending</div></div>;
+   return <div style={{ lineHeight: 1.3 }}><div style={{ fontSize: 10, color: 'var(--muted)' }}>budget {fmt(budget)}</div><div className="vendor-note" style={{ fontStyle: 'italic' }}>entry yet to be done</div></div>;
   }
-  const a = actual;
-  const d = a - b;
+  const d = actual - budget;
   const good = lowerIsBetter ? d <= 0 : d >= 0;
   const tone = good ? '#059669' : 'var(--danger)';
-  const pct = b !== 0 ? Math.round((a / b) * 100) : null;
+  const pct = budget !== 0 ? Math.round((actual / budget) * 100) : null;
   return (
-   <div style={{ lineHeight: 1.25 }}>
-    <div style={{ fontSize: 10, color: 'var(--muted)' }}>budget {fmt(b)}</div>
-    <div style={{ fontWeight: 600 }}>actual {fmt(a)}</div>
+   <div style={{ lineHeight: 1.3 }}>
+    <div style={{ fontSize: 10, color: 'var(--muted)' }}>budget {fmt(budget)}</div>
+    <div style={{ fontWeight: 600 }}>actual {fmt(actual)}</div>
     <div style={{ fontSize: 10, color: tone, fontWeight: 600 }}>{d >= 0 ? '+' : ''}{fmt(d)}{pct !== null ? ` · ${pct}%` : ''}</div>
    </div>
   );
  };
- const metrics: Array<{ label: string; budget: (it: PastWeeksGridItem) => number | null; actual: (it: PastWeeksGridItem) => number | null; lowerIsBetter?: boolean }> = [
-  { label: 'Total Inflows', budget: (it) => it.snapshot?.totalInflowWk1 ?? null, actual: (it) => it.actuals?.inflow ?? null },
-  { label: 'Total Outflows', budget: (it) => it.snapshot?.totalOutflowWk1 ?? null, actual: (it) => it.actuals?.outflow ?? null, lowerIsBetter: true },
-  { label: 'Net Change', budget: (it) => it.snapshot?.netChangeWk1 ?? null, actual: (it) => it.actuals?.netChange ?? null },
- ];
+ const hdr = (w: Cashflow13['weeks'][number], i: number) => (
+  <th key={w.start} className="num">
+   <div>Wk -{i + 1}</div>
+   <div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}>{w.label} – {w.end.slice(5).replace('-', '/')}</div>
+  </th>
+ );
  return (
   <CollapsibleSection
-   title={`Variance · budget vs actual (${items.length} week${items.length === 1 ? '' : 's'})`}
-   sub={<>Per closed week: <strong>budget</strong> (forecast frozen that Monday) vs <strong>actual</strong> (what hit the bank / was collected) and the <strong>Δ</strong>. Green = better than plan (more cash in, less out, higher net). Weeks without a captured snapshot show actual only.</>}
+   title="Variance · budget vs actual"
+   sub={<>Per elapsed week: <strong>budget</strong> (the plan for that week) over <strong>actual</strong> over the <strong>Δ</strong>. Green = better than plan (more cash in, less out, higher net). Lines whose actual isn't booked yet show <em>entry yet to be done</em>.</>}
   >
    <div className="table-wrap">
     <table className="data-table" style={{ fontSize: 12 }}>
-     <thead>
-      <tr>
-       <th>Metric</th>
-       {items.map((it, i) => (
-        <th key={it.monday} className="num">
-         <div>Wk -{i + 1}</div>
-         <div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}>{it.monday.slice(5)}{!it.weekClosed && ' *'}</div>
-        </th>
-       ))}
-      </tr>
-     </thead>
+     <thead><tr><th>Line item</th>{weeks.map(hdr)}</tr></thead>
      <tbody>
-      {metrics.map((m) => (
-       <tr key={m.label}>
-        <td><strong>{m.label}</strong></td>
-        {items.map((it) => <td key={it.monday} className="num">{vcell(m.budget(it), m.actual(it), m.lowerIsBetter)}</td>)}
+      <tr><td colSpan={1 + weeks.length} style={{ background: 'var(--accent-soft)', fontWeight: 700, color: '#059669' }}>CASH INFLOWS</td></tr>
+      {budgetData.inflows.map((line, idx) => (
+       <tr key={`in-${line.label}`}>
+        <td>{line.label}</td>
+        {weeks.map((w, wi) => {
+         const a = byMonday.get(w.start)?.actuals ?? null;
+         const actual = a ? actualForInflowLine(line.label, a) : null;
+         return <td key={w.start} className="num">{vcell(budgetData.inflows[idx].values[wi] ?? 0, actual)}</td>;
+        })}
        </tr>
       ))}
+      <tr className="total-row">
+       <td>TOTAL INFLOWS</td>
+       {weeks.map((w, wi) => {
+        const a = byMonday.get(w.start)?.actuals ?? null;
+        const actual = a ? (a.arActuals?.total ?? 0) + (a.salesInvoiced?.total ?? 0) : null;
+        return <td key={w.start} className="num">{vcell(budgetData.totals.inflows[wi] ?? 0, actual)}</td>;
+       })}
+      </tr>
+      <tr><td colSpan={1 + weeks.length} style={{ background: 'var(--danger-soft)', fontWeight: 700, color: 'var(--danger)' }}>CASH OUTFLOWS</td></tr>
+      {budgetData.outflows.map((line, idx) => (
+       <tr key={`out-${line.label}`}>
+        <td>{line.label}</td>
+        {weeks.map((w, wi) => <td key={w.start} className="num">{vcell(budgetData.outflows[idx].values[wi] ?? 0, null)}</td>)}
+       </tr>
+      ))}
+      <tr className="total-row">
+       <td>TOTAL OUTFLOWS</td>
+       {weeks.map((w, wi) => { const a = byMonday.get(w.start)?.actuals ?? null; return <td key={w.start} className="num">{vcell(budgetData.totals.outflows[wi] ?? 0, a ? a.outflow : null, true)}</td>; })}
+      </tr>
+      <tr className="total-row">
+       <td><strong>NET CHANGE</strong></td>
+       {weeks.map((w, wi) => { const a = byMonday.get(w.start)?.actuals ?? null; return <td key={w.start} className="num">{vcell(budgetData.totals.netChange[wi] ?? 0, a ? a.netChange : null)}</td>; })}
+      </tr>
      </tbody>
     </table>
    </div>
-   <div className="vendor-note" style={{ marginTop: 8 }}>Outflow actuals are raw bank debits (include transfers / CC payments), so their Δ is noisier than inflows. * current in-progress week.</div>
+   <div className="vendor-note" style={{ marginTop: 8 }}>Outflow actuals are booked at the bank-total level only (TOTAL OUTFLOWS), so per-category outflows show pending. Green Δ on outflows = spent less than planned.</div>
   </CollapsibleSection>
  );
 }
-
