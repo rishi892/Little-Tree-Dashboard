@@ -668,12 +668,31 @@ export type WeeklySnapshotsResult = WeeklySnapshotsResponse;
 /** Calendar-based past weeks grid: returns last N Mondays (default 13), each
  *  with its actuals and snapshot (if captured). Used by Past Weeks view so
  *  every closed week shows up even without a snapshot. */
+/** Actual QB expenses for a week, bucketed into the budget outflow lines. */
+export type WeekExpenseLines = {
+ weekStart: string;
+ weekEnd: string;
+ byLine: {
+  'Payroll': number;
+  'Inventory & Raw Materials': number;
+  'Software & Subscriptions': number;
+  'Other Expenses': number;
+ };
+ total: number;
+};
+/** Live-computed expected AR collections for a week (by invoice terms). */
+export type ExpectedInflowWeek = { gelato: number; other: number; total: number };
+
 export type PastWeeksGridItem = {
  monday: string;
  weekEnd: string;
  weekClosed: boolean;
  snapshot: WeeklySnapshot | null;
  actuals: WeekActuals | null;
+ /** Actual expenses pulled from QB P&L (Cash) for the week, per budget line. */
+ qbExpenses: WeekExpenseLines | null;
+ /** Expected AR collections for the week, computed live from invoice terms. */
+ expectedInflow: ExpectedInflowWeek | null;
 };
 export type PastWeeksGridResponse = { count: number; items: PastWeeksGridItem[] };
 export async function fetchPastWeeksGrid(weeks = 13): Promise<PastWeeksGridResponse> {

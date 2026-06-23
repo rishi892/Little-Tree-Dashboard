@@ -476,33 +476,50 @@ app.get('/api/weekly-snapshots', async (_req, res, next) => {
  *   - actuals: live sales + AR from LT Financials in that week's date range
  *     (capped at today for in-progress weeks)
  */
-app.get('/api/past-weeks-grid', async (req, res, next) => {
+app.get('/api/past-weeks-grid', async (_req, res, next) => {
  try {
   const { listSnapshots } = await import('./weeklySnapshots.js');
   const { getWeekActuals } = await import('./snapshotActuals.js');
-  const todayD = new Date();
-  const todayUtc = new Date(Date.UTC(todayD.getUTCFullYear(), todayD.getUTCMonth(), todayD.getUTCDate()));
+  const { getWeekExpensesByLine, getExpectedInflowByWeek } = await import('./weeklyActuals.js');
   const ymd = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-  const todayStr = ymd(todayUtc);
+  const addDaysUtc = (d: Date, n: number) => { const r = new Date(d); r.setUTCDate(d.getUTCDate() + n); return r; };
+  const todayD = new Date();
+  const todayStr = ymd(new Date(Date.UTC(todayD.getUTCFullYear(), todayD.getUTCMonth(), todayD.getUTCDate())));
+
+  // Past view starts at the FIRST MONDAY OF MAY 2026 (per user) and runs to the
+  // most recently CLOSED week - not a rolling 13-back window. Grows each week.
+  const may1 = new Date(Date.UTC(2026, 4, 1));
+  const dow = may1.getUTCDay();                       // Sun=0..Sat=6
+  const START = addDaysUtc(may1, dow === 1 ? 0 : (8 - dow) % 7); // first Monday on/after May 1
+  const mondays: Array<{ monday: string; weekEnd: string }> = [];
+  for (let i = 0; i < 30; i++) {
+   const mon = addDaysUtc(START, i * 7);
+   const sun = addDaysUtc(mon, 6);
+   if (ymd(sun) >= todayStr) break;                   // only fully-closed weeks
+   mondays.push({ monday: ymd(mon), weekEnd: ymd(sun) });
+  }
+  mondays.reverse();                                  // newest week first (Wk -1)
+
   const snaps = await listSnapshots();
-  // Newest first - then drop the current in-progress week so Wk1 in the
-  // Past Weeks view is always the most recently CLOSED week (per user
-  // direction: "jo week pas hai wo week-1 chalega" - the week that's
-  // already passed should be Wk1).
-  snaps.sort((a, b) => b.monday.localeCompare(a.monday));
-  const items = await Promise.all(snaps.map(async (snap) => {
-   const mon = new Date(snap.monday + 'T00:00:00Z');
-   const sun = new Date(mon.getTime() + 6 * 86400000);
-   const sundayYmd = ymd(sun);
-   const weekClosed = sundayYmd < todayStr;
-   const effectiveEnd = weekClosed ? sundayYmd : todayStr;
+  const snapByMon = new Map(snaps.map((s) => [s.monday, s]));
+  const expected = await getExpectedInflowByWeek(mondays.map((m) => ({ start: m.monday, end: m.weekEnd })));
+
+  const items = await Promise.all(mondays.map(async (m, i) => {
    let actuals = null;
-   try { actuals = await getWeekActuals(snap.monday, effectiveEnd); }
-   catch { actuals = null; }
-   return { monday: snap.monday, weekEnd: sundayYmd, weekClosed, snapshot: snap, actuals };
+   try { actuals = await getWeekActuals(m.monday, m.weekEnd); } catch { actuals = null; }
+   let qbExpenses = null;
+   try { qbExpenses = await getWeekExpensesByLine(m.monday, m.weekEnd); } catch { qbExpenses = null; }
+   return {
+    monday: m.monday,
+    weekEnd: m.weekEnd,
+    weekClosed: true,
+    snapshot: snapByMon.get(m.monday) ?? null,
+    actuals,
+    qbExpenses,
+    expectedInflow: expected[i] ?? null,
+   };
   }));
-  const closedOnly = items.filter((it) => it.weekClosed);
-  res.json({ count: closedOnly.length, items: closedOnly });
+  res.json({ count: items.length, items });
  } catch (err) { next(err); }
 });
 
