@@ -57,11 +57,12 @@ alter table qb_config enable row level security;
 -- Per-connection tokens: access + refresh in real columns so the connection
 -- survives restarts/redeploys and never silently drops.
 create table if not exists qb_tokens (
-  realm_id      text primary key,
-  access_token  text not null,
-  refresh_token text not null,
-  expires_at    bigint not null,           -- epoch ms
-  updated_at    timestamptz default now()
+  realm_id        text primary key,
+  access_token    text not null,
+  refresh_token   text not null,
+  expires_at      bigint not null,         -- epoch ms
+  updated_at      timestamptz default now(),
+  refresh_lock_at timestamptz              -- cross-instance refresh lock (one refresher at a time)
 );
 alter table qb_tokens enable row level security;
 

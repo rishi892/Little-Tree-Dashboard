@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import OAuthClient from 'intuit-oauth';
 import { loadQbConfig } from './qbConfig.js';
-import { loadTokens, saveTokens, invalidateTokenCache, type StoredTokens } from './tokenStore.js';
+import { loadTokens, loadTokensFresh, saveTokens, acquireRefreshLock, type StoredTokens } from './tokenStore.js';
 
 // The OAuth client is built from the qb_config table (client id/secret/redirect/
 // environment). Rebuild only when those values actually change, so an admin edit
@@ -53,17 +53,25 @@ export async function exchangeCodeForTokens(reqUrl: string, realmId: string): Pr
 
 /**
  * Refresh-token rotation guard. Intuit rotates the refresh_token on every
- * /refresh call: the winning call gets a new one, the losing concurrent calls
- * use the now-invalidated old one and get "Refresh token is invalid" - which
- * killed the session every ~hour when the prefetcher fired multiple QB calls
- * in parallel. This mutex ensures exactly one refresh happens at a time and
- * all concurrent callers share its result.
+ * /refresh call and runs token-reuse detection: if two callers refresh with the
+ * SAME refresh_token, the loser gets "invalid_grant" AND Intuit can revoke the
+ * whole token family - which is what kept dropping the connection (the
+ * dashboard fires many parallel QB calls, and on serverless they spread across
+ * separate function instances).
+ *
+ * Two layers stop that now:
+ *  1. refreshInFlight - dedupes refreshes WITHIN one instance.
+ *  2. acquireRefreshLock() - a DB row-lock so exactly ONE instance across the
+ *     whole fleet calls Intuit per rotation; everyone else waits for it to
+ *     write the new token, then reuses it.
  */
 let refreshInFlight: Promise<StoredTokens> | null = null;
 
 /** Refresh this many ms BEFORE expiry. 5 min gives long-running QB queries
  * (some take 10–15s on a cold pull) plenty of headroom. */
 const REFRESH_LEAD_MS = 5 * 60_000;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export async function getValidAccessToken(): Promise<StoredTokens> {
  const tokens = await loadTokens();
@@ -74,16 +82,49 @@ export async function getValidAccessToken(): Promise<StoredTokens> {
  return tokens;
  }
 
- // Another refresh is already in flight → wait for it instead of starting a new one.
+ // Another refresh is already in flight in THIS instance → share its result.
  if (refreshInFlight) return refreshInFlight;
 
- refreshInFlight = (async () => {
+ refreshInFlight = doRefresh(tokens).finally(() => {
+ refreshInFlight = null;
+ });
+ return refreshInFlight;
+}
+
+/** Coordinate the refresh across all instances, then perform it. */
+async function doRefresh(current: StoredTokens): Promise<StoredTokens> {
+ const won = await acquireRefreshLock(current.realmId);
+ if (!won) {
+ // Another instance is refreshing right now. Wait for it to write a fresh
+ // token rather than racing Intuit (which would trip reuse-detection).
+ const fresh = await waitForFreshToken(current.expiresAt);
+ if (fresh) return fresh;
+ // Holder hung/crashed and the lock TTL has elapsed → claim it and do it
+ // ourselves as a last resort.
+ await acquireRefreshLock(current.realmId);
+ }
+ return performIntuitRefresh(current);
+}
+
+/** Poll the DB until a token newer than `staleExpiry` appears (someone else
+ * refreshed) or we give up. */
+async function waitForFreshToken(staleExpiry: number): Promise<StoredTokens | null> {
+ const deadline = Date.now() + 14_000;
+ while (Date.now() < deadline) {
+ await sleep(400);
+ const t = await loadTokensFresh();
+ if (t && t.expiresAt > staleExpiry) return t;
+ }
+ return null;
+}
+
+async function performIntuitRefresh(current: StoredTokens): Promise<StoredTokens> {
  try {
  const client = await getOauthClient();
  client.setToken({
- access_token: tokens.accessToken,
- refresh_token: tokens.refreshToken,
- realmId: tokens.realmId,
+ access_token: current.accessToken,
+ refresh_token: current.refreshToken,
+ realmId: current.realmId,
  token_type: 'bearer',
  expires_in: 0,
  });
@@ -92,31 +133,23 @@ export async function getValidAccessToken(): Promise<StoredTokens> {
  const updated: StoredTokens = {
  accessToken: json.access_token,
  refreshToken: json.refresh_token,
- realmId: tokens.realmId,
+ realmId: current.realmId,
  expiresAt: Date.now() + json.expires_in * 1000,
  };
  await saveTokens(updated);
  console.log(`[oauth] refreshed QB access token; valid for ${json.expires_in}s`);
  return updated;
  } catch (e) {
- // "Refresh token invalid" usually means another process (user re-OAuth
- // in browser, another server worker) saved fresh tokens. Invalidate the
- // in-memory cache so the next loadTokens() picks up disk content, then
- // retry once.
+ // invalid_grant means another instance already rotated the refresh token.
+ // Re-read the DB - the fresh token should be there.
  const msg = e instanceof Error ? e.message : String(e);
- if (/refresh token.*invalid/i.test(msg)) {
- invalidateTokenCache();
- const fresh = await loadTokens();
- if (fresh && fresh.refreshToken !== tokens.refreshToken) {
- console.log('[oauth] picked up fresh tokens from disk after refresh failure');
+ if (/refresh token.*invalid|invalid_grant/i.test(msg)) {
+ const fresh = await waitForFreshToken(current.expiresAt) ?? (await loadTokensFresh());
+ if (fresh && fresh.refreshToken !== current.refreshToken) {
+ console.log('[oauth] picked up fresh tokens from DB after refresh failure');
  return fresh;
  }
  }
  throw e;
- } finally {
- refreshInFlight = null;
  }
- })();
-
- return refreshInFlight;
 }

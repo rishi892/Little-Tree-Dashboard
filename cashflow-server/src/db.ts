@@ -65,3 +65,29 @@ export async function dbSelectOne<T = Record<string, unknown>>(table: string, qu
   const rows = await dbSelect<T>(table, query ? `${query}&limit=1` : 'limit=1');
   return rows[0] ?? null;
 }
+
+/**
+ * Atomic conditional update. PATCHes rows matching `query`, returns the rows
+ * that were actually updated. Because a PostgREST PATCH is a single SQL UPDATE,
+ * this is atomic across concurrent callers - the basis for a distributed lock
+ * (only one caller's UPDATE matches the "lock is free" condition). Returns []
+ * when nothing matched (lock already held) or Supabase is unreachable.
+ */
+export async function dbUpdateReturning<T = Record<string, unknown>>(
+  table: string,
+  query: string,
+  patch: Record<string, unknown>,
+): Promise<T[]> {
+  if (!dbEnabled) return [];
+  try {
+    const res = await fetch(`${SUPA_URL}/rest/v1/${table}?${query}`, {
+      method: 'PATCH',
+      headers: headers({ 'Content-Type': 'application/json', Prefer: 'return=representation' }),
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) return [];
+    return (await res.json()) as T[];
+  } catch {
+    return [];
+  }
+}

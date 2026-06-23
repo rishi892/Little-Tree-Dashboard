@@ -1,6 +1,11 @@
-import { dbSelectOne, dbUpsert, dbDelete } from './db.js';
+import { dbSelectOne, dbUpsert, dbDelete, dbUpdateReturning } from './db.js';
 
 type TokenRow = { realm_id: string; access_token: string; refresh_token: string; expires_at: number };
+
+/** How long a refresh lock is considered held before it's treated as stale
+ * (the holder probably crashed mid-refresh). Kept short - a normal refresh
+ * finishes in 2-5s. */
+const REFRESH_LOCK_TTL_MS = 12_000;
 
 export type StoredTokens = {
  accessToken: string;
@@ -27,6 +32,13 @@ function isValidTokenShape(t: unknown): t is StoredTokens {
      && typeof o.refreshToken === 'string' && o.refreshToken.length > 0
      && typeof o.realmId === 'string'      && o.realmId.length > 0
      && typeof o.expiresAt === 'number'    && o.expiresAt > 0;
+}
+
+/** Force a fresh read from the DB, bypassing the in-memory cache. Used while
+ * waiting for another instance to finish a refresh. */
+export async function loadTokensFresh(): Promise<StoredTokens | null> {
+ invalidateTokenCache();
+ return loadTokens();
 }
 
 export async function loadTokens(): Promise<StoredTokens | null> {
@@ -61,8 +73,23 @@ export async function saveTokens(tokens: StoredTokens): Promise<void> {
    refresh_token: tokens.refreshToken,
    expires_at: tokens.expiresAt,
    updated_at: new Date().toISOString(),
+   refresh_lock_at: null, // releasing the lock: this refresh cycle is done
  });
  console.log(`[tokenStore] saved tokens (expiresAt=${new Date(tokens.expiresAt).toISOString()})`);
+}
+
+/**
+ * Try to claim the cross-instance refresh lock for this realm. Returns true if
+ * THIS caller won (and must perform the refresh), false if another instance
+ * already holds a fresh lock. Atomic: the PATCH only matches when the lock is
+ * free or stale, so exactly one concurrent caller succeeds.
+ */
+export async function acquireRefreshLock(realmId: string): Promise<boolean> {
+ const nowIso = new Date().toISOString();
+ const staleCutoff = new Date(Date.now() - REFRESH_LOCK_TTL_MS).toISOString();
+ const q = `realm_id=eq.${encodeURIComponent(realmId)}&or=(refresh_lock_at.is.null,refresh_lock_at.lt.${staleCutoff})`;
+ const updated = await dbUpdateReturning('qb_tokens', q, { refresh_lock_at: nowIso });
+ return updated.length > 0;
 }
 
 export async function clearTokens(): Promise<void> {
