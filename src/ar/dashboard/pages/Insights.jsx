@@ -18,6 +18,11 @@ import InfoTip from '../components/InfoTip.jsx'
 
 // (no default export - only the named tab exports below are used)
 
+// Strip the book prefix ("Little Tree-" / "Gelato-") from a customer name for
+// display only, tolerating common misspellings of the prefix (Gelatto-,
+// Gellato-, Galato-, Gelatoo-, …) and hyphen / en-dash / em-dash separators.
+const stripBookPrefix = (v) => String(v || '').replace(/^\s*(little\s*tree+s?|g[ae]l+[ae]t+o*)\s*[-–—]\s*/i, '')
+
 // ============ DECLINING CUSTOMERS ============
 export function DecliningTab({ ws, noBrand = false }) {
   const { openCustomer } = useNav()
@@ -190,7 +195,7 @@ export function DecliningTab({ ws, noBrand = false }) {
                 <tbody>
                   {[...brandRows].sort((a, b) => b.lifetime - a.lifetime).map((r) => (
                     <tr key={r.vendor} className="clickable-row" onClick={() => openCustomer(r.vendor)}>
-                      <td className="vendor-cell">{r.vendor.replace(/^Little Tree-\s*/i, '')}</td>
+                      <td className="vendor-cell">{stripBookPrefix(r.vendor)}</td>
                       <td><span className={`trend-pill trend-${r.trend}`}>{r.trend}</span></td>
                       <td className="muted">{r.lastOrder ? r.lastOrder.toLocaleDateString('en-CA') : ''}</td>
                       <td className={`num ${r.trend === 'churned' ? 'cell-warn' : ''}`}>{r.daysSilent ?? ''}</td>
@@ -541,7 +546,7 @@ export function AllCustomersTab({ ws }) {
               {shown.slice(pager.start, pager.end).map((r) => (
 
                 <tr key={r.vendor} className="clickable-row" onClick={() => openCustomer(r.vendor)}>
-                  <td className="vendor-cell">{r.vendor.replace(/^Little Tree-\s*/i, '')}</td>
+                  <td className="vendor-cell">{stripBookPrefix(r.vendor)}</td>
                   <td className="num">{money(r.invoicedCY)}</td>
                   <td className="num muted">{r.paidCY > 0 ? money(r.paidCY) : ''}</td>
                   <td className={`num ${r.outstanding > 0 ? 'cell-warn' : ''}`}>{r.outstanding > 0 ? money(r.outstanding) : ''}</td>
@@ -731,7 +736,7 @@ export function CadenceTab({ ws, noBrand = false }) {
                 <tbody>
                   {[...brandRows].sort((a, b) => (b.ratio || 0) - (a.ratio || 0)).map((r) => (
                     <tr key={r.vendor} className="clickable-row" onClick={() => openCustomer(r.vendor)}>
-                      <td className="vendor-cell">{r.vendor.replace(/^Little Tree-\s*/i, '')}</td>
+                      <td className="vendor-cell">{stripBookPrefix(r.vendor)}</td>
                       <td className="num">{r.orderCount}</td>
                       <td className="num">{r.median != null ? `${r.median.toFixed(0)}d` : ''}</td>
                       <td className="muted">{r.lastOrder ? r.lastOrder.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' }) : ''}</td>
@@ -1368,7 +1373,7 @@ export function ConcentrationTab({ ws }) {
                     const pct = totalSales > 0 ? (r.sales / totalSales) * 100 : 0
                     return (
                       <tr key={r.vendor} className="clickable-row" onClick={() => openCustomer(r.vendor)}>
-                        <td className="vendor-cell">{r.vendor.replace(/^Little Tree-\s*/i, '')}</td>
+                        <td className="vendor-cell">{stripBookPrefix(r.vendor)}</td>
                         <td className="num">{money(r.sales)}</td>
                         <td className="num">{pct.toFixed(1)}%</td>
                         <td className={`num ${r.outstanding > 0 ? 'cell-warn' : ''}`}>{r.outstanding > 0 ? money(r.outstanding) : ''}</td>

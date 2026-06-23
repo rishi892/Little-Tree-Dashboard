@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ExportButton } from '../../lib/csv.jsx'
-import { isPrivateLabel } from '../../lib/brands.js'
+import { isPrivateLabel, catchAllLast } from '../../lib/brands.js'
 import { money, num, shortDate } from '../../lib/format.js'
 import { useNav } from '../../lib/navigation.jsx'
 import { usePager, Pager } from '../../lib/pagination.jsx'
@@ -46,6 +46,7 @@ export default function ActionList({ data, scope = 'all', segment = 'all' }) {
   // Drill view: brand → store → invoices
   const [brandView, setBrandView] = useState(null)
   const [storeView, setStoreView] = useState(null)
+  const [q, setQ] = useState('') // free-text search over the current drill level
 
 
   const items = useMemo(() => {
@@ -139,7 +140,7 @@ export default function ActionList({ data, scope = 'all', segment = 'all' }) {
       if ((r.daysOverdue || 0) > g.oldest) g.oldest = r.daysOverdue || 0
       m.set(b, g)
     }
-    return [...m.values()].sort((a, b) => b.outstanding - a.outstanding)
+    return [...m.values()].sort(catchAllLast((g) => g.brand, (a, b) => b.outstanding - a.outstanding))
   }, [items])
   const storeGroups = useMemo(() => {
     if (hasBrands && !brandView) return []
@@ -157,11 +158,19 @@ export default function ActionList({ data, scope = 'all', segment = 'all' }) {
     () => storeView ? items.filter((r) => r.vendor === storeView && (hasBrands ? brandKey(r) === brandView : true)) : [],
     [items, brandView, storeView, hasBrands])
   useEffect(() => { setBrandView(null); setStoreView(null) }, [mode, includeGelato, scope, segment, data])
+  useEffect(() => { setQ('') }, [brandView, storeView, mode])
 
   const level = !hasBrands
     ? (storeView === null ? 'store' : 'invoice')
     : (brandView === null ? 'brand' : storeView === null ? 'store' : 'invoice')
-  const currentRows = level === 'brand' ? brandGroups : level === 'store' ? storeGroups : invoiceRows
+  const baseRows = level === 'brand' ? brandGroups : level === 'store' ? storeGroups : invoiceRows
+  const currentRows = useMemo(() => {
+    const n = q.trim().toLowerCase()
+    if (!n) return baseRows
+    if (level === 'brand') return baseRows.filter((g) => (g.brand || '').toLowerCase().includes(n))
+    if (level === 'store') return baseRows.filter((g) => (g.vendor || '').toLowerCase().includes(n))
+    return baseRows.filter((r) => `${r.vendor} ${r.invNo} ${r.salesRep || ''}`.toLowerCase().includes(n))
+  }, [baseRows, q, level])
 
   const pager = usePager(currentRows.length, 50,
     JSON.stringify([mode, level, brandView, storeView, includeGelato]))
@@ -214,6 +223,13 @@ export default function ActionList({ data, scope = 'all', segment = 'all' }) {
                 <span>Include Gelato</span>
               </label>
             )}
+            <input
+              type="search"
+              className="table-search"
+              placeholder={level === 'brand' ? 'Search brand…' : level === 'store' ? 'Search store…' : 'Search invoice, customer, rep…'}
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
             <ExportButton
               filename={`action-list-${new Date().toISOString().slice(0,10)}.csv`}
               headers={['Channel', 'Invoice #', 'Date', 'Brand', 'Customer', 'Rep', 'Outstanding', 'Days past due', 'Aging band', 'Due date', 'Email']}

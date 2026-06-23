@@ -8,6 +8,10 @@ import { nameConfidence } from './fuzzy.js'
 // AR, uncollectable, etc.). Trivial leftover balances aren't worth chasing.
 export const MIN_OUTSTANDING = 100
 
+// Invoices with a $0 or $0.10 amount are placeholders/voids - dropped everywhere
+// (every table, KPI, chart, DSO) across wholesale, financials, and Gelato.
+const isVoidInvoiceAmount = (a) => Math.abs(a) < 1e-9 || Math.abs(a - 0.1) < 1e-9
+
 
 const SHEETS = {
   invoices: 'https://docs.google.com/spreadsheets/d/1hcxz0jxBKIvoMSYrluxOYfBf3hOa4cXEIpqvaRtt-fI/export?format=csv&gid=0',
@@ -18,7 +22,9 @@ const SHEETS = {
   alienSales:  'https://docs.google.com/spreadsheets/d/15XztfUmjiPbfh-ublCPZAVpA6MrCumytbOmhbzfGIUg/export?format=csv&gid=2089690658',
   yachtSales:  'https://docs.google.com/spreadsheets/d/15XztfUmjiPbfh-ublCPZAVpA6MrCumytbOmhbzfGIUg/export?format=csv&gid=2036957944',
   funkdSales:  'https://docs.google.com/spreadsheets/d/15XztfUmjiPbfh-ublCPZAVpA6MrCumytbOmhbzfGIUg/export?format=csv&gid=2009621541',
+  gelatoCustomers: 'https://docs.google.com/spreadsheets/d/1AEuFVXX70Q2oNOfFBEA4czxaQOzACPBlY7g6s5ZV9sI/export?format=csv&gid=1630758710',
 }
+
 
 const MONTH_SHORT = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
 const MONTH_LONG  = ['january','february','march','april','may','june','july','august','september','october','november','december']
@@ -316,7 +322,8 @@ function normalizeGelato(r, today) {
     isOutstanding: !isPaid && !isWriteOff && outstanding > MIN_OUTSTANDING,
     qbStatus: '',
     salesRep: '', // Gelato sheet has no sales rep column
-    brand: 'Gelato',
+        brand: 'Gelato',
+    trackerBrand: (r['Brand'] || '').trim(),
     email: (r['Email'] || '').trim(),
     contactNumber: (r['Phone Number'] || '').trim(),
     daysOutstanding: date ? Math.floor((today - date) / 86400000) : null,
@@ -541,11 +548,35 @@ function parseFunkdSales(rows) {
 // date isn't "before 2023").
 const MIN_DATA_YEAR = 2023
 
+// Regroup the Gelato book by brand: each invoice's grouping identity (vendor)
+// and brand are set to its resolved gelatoBrand, so every customer-level rollup
+// collapses to brand level. Leaves invoices / financials / customer-master untouched.
+export function regroupGelatoByBrand(data) {
+  if (!data || !data.gelato) return data
+  return {
+    ...data,
+    gelato: data.gelato.map((r) => ({ ...r, vendor: r.gelatoBrand || 'No brand', brand: r.gelatoBrand || 'No brand' })),
+  }
+}
+
+// Lighter transform for the AR page By-Brand mode: keep each invoice's real
+// store (vendor) but attach masterBrand = its brand, so the native
+// Brand → Store → Invoice drills (Action List, detail modal, brand rollups)
+// light up for Gelato exactly like Little Tree.
+export function attachGelatoBrand(data) {
+  if (!data || !data.gelato) return data
+  return {
+    ...data,
+    gelato: data.gelato.map((r) => ({ ...r, masterBrand: r.gelatoBrand || 'Uncategorized Brand' })),
+  }
+}
+
 export async function loadAll() {
+
   const today = new Date()
   today.setHours(0, 0, 0, 0)
 
-    const [invRaw, finRaw, gelRaw, custRaw, gelSalesRaw, alienRaw, yachtRaw, funkdRaw] = await Promise.all([
+    const [invRaw, finRaw, gelRaw, custRaw, gelSalesRaw, alienRaw, yachtRaw, funkdRaw, gelCustRaw] = await Promise.all([
     fetchCsv(SHEETS.invoices),
     fetchCsv(SHEETS.financials),
     fetchCsv(SHEETS.gelato, { header: true }),
@@ -554,24 +585,28 @@ export async function loadAll() {
     fetchCsv(SHEETS.alienSales),
     fetchCsv(SHEETS.yachtSales),
     fetchCsv(SHEETS.funkdSales),
+    fetchCsv(SHEETS.gelatoCustomers, { header: true }),
   ])
+
 
   const invoices = rowsToObjects(invRaw)
     .map((r) => normalizeInvoice(r, today))
     .filter((r) => r.invNo)
-    .filter((r) => r.invoiceAmount !== 0)
+    .filter((r) => !isVoidInvoiceAmount(r.invoiceAmount))
     .filter((r) => !EXCLUDED_INVOICES.has(r.invNo))
     .filter((r) => !r.date || r.date.getFullYear() >= MIN_DATA_YEAR)
 
   const financials = rowsToObjects(finRaw)
     .map(normalizeFinancial)
     .filter((r) => r.invNo)
+    .filter((r) => !isVoidInvoiceAmount(r.invoiceAmount))
     .filter((r) => !EXCLUDED_INVOICES.has(r.invNo))
     .filter((r) => !r.date || r.date.getFullYear() >= MIN_DATA_YEAR)
 
     const gelato = gelRaw
     .map((r) => normalizeGelato(r, today))
     .filter((r) => r.invNo)
+    .filter((r) => !isVoidInvoiceAmount(r.invoiceAmount))
     .filter((r) => !r.date || r.date.getFullYear() >= MIN_DATA_YEAR)
 
   // Operator-maintained customer list (Customer Name + Private Label checkbox).
@@ -586,10 +621,25 @@ export async function loadAll() {
         totalRevenue: parseMoney(r['Total Revenue']),
         brand: String(r['Brand'] || '').trim(),
         salesRep: CUSTOMER_REP_OVERRIDES[name.toLowerCase()] || String(r['Sales Rep'] || '').trim(),
+        arOwner: String(r['AR Owner'] || '').trim(),
       }
+
     })
 
     .filter((c) => c.name)
+
+  // Gelato customer master list (separate sheet/Apps Script from Little Tree).
+  const gelatoCustomers = gelCustRaw
+    .map((r) => ({
+      name: String(r['Customer Name'] || '').trim(),
+      brand: String(r['Brand'] || '').trim(),
+      firstOrder: String(r['First Order Date'] || '').trim(),
+      lastOrder: String(r['Last Order Date'] || '').trim(),
+      totalRevenue: parseMoney(r['Total Revenue']),
+      salesRep: String(r['Sales Rep'] || '').trim(),
+    }))
+    .filter((c) => c.name)
+
 
   // Canonicalize Little Tree (invoice tracker + financials) SEPARATELY from the
   // Gelato book. A store that appears in both sheets keeps its Little Tree
@@ -604,6 +654,16 @@ export async function loadAll() {
   invoices.forEach((r) => { r.vendor = canonicalVendor(r.vendor, ltIndex) })
   financials.forEach((r) => { r.vendor = canonicalVendor(r.vendor, ltIndex) })
   gelato.forEach((r) => { r.vendor = canonicalVendor(r.vendor, gelatoIndex) })
+
+  // Resolve each Gelato invoice's brand for the By-Brand toggle: customer master
+  // list first (match on customer name), then the tracker's own Brand column,
+  // else 'No brand'.
+  const gelBrandByCust = new Map()
+  gelatoCustomers.forEach((c) => { if (c.brand) gelBrandByCust.set(custNorm(c.name), c.brand) })
+  gelato.forEach((r) => {
+    r.gelatoBrand = gelBrandByCust.get(custNorm(r.vendor)) || r.trackerBrand || 'Uncategorized Brand'
+  })
+
 
      const vendorPrivateLabel = buildVendorPrivateLabel(
     customers,
@@ -632,6 +692,7 @@ export async function loadAll() {
     funkd: parseFunkdSales(funkdRaw),
   }
 
-  return { invoices, financials, gelato, customers, vendorPrivateLabel, pl1, fetchedAt: new Date() }
+  return { invoices, financials, gelato, customers, gelatoCustomers, vendorPrivateLabel, pl1, fetchedAt: new Date() }
+
 }
 

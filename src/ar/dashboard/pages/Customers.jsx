@@ -6,6 +6,8 @@ import { RiskTab, DecliningTab, BehaviorTab, CadenceTab, AllCustomersTab } from 
 import { ColumnFilter, useColFilter } from '../components/ColumnFilter.jsx'
 import InfoTip from '../components/InfoTip.jsx'
 import { ExportButton } from '../../lib/csv.jsx'
+import GelatoCustomerListTab from './GelatoCustomerList.jsx'
+
 
 
 // 'brands' is wholesale-only - Gelato is a single brand, so the sub-tab is
@@ -18,8 +20,10 @@ const TABS = [
   { id: 'declining', label: 'Customer Health' },
    { id: 'behavior', label: 'Payment Behavior' },
   { id: 'customers', label: 'Customer Master List', ltOnly: true },
+  { id: 'gelatoCustomers', label: 'Customer Master List', gelatoOnly: true },
 
 ]
+
 
 
 const BUCKET_CLASS = {
@@ -34,13 +38,13 @@ const BUCKET_CLASS = {
 
 // `book` is set per sidebar page: 'lt' (Little Tree wholesale) or 'gelato'.
 // The two books are fully separate pages, not tabs inside one view.
-export default function Customers({ data, book = 'lt' }) {
+export default function Customers({ data, book = 'lt', gelatoGroup = 'customer', setGelatoGroup }) {
   const [tab, setTab] = useState('all')
   const [modalBrand, setModalBrand] = useState(null)
   const ws = useMemo(() => (book === 'gelato' ? gelatoScope(data) : wholesaleScope(data)), [data, book])
 
   // Tabs available for this book (Brands is wholesale-only)
-  const visibleTabs = book === 'gelato' ? TABS.filter((t) => !t.ltOnly) : TABS
+  const visibleTabs = book === 'gelato' ? TABS.filter((t) => !t.ltOnly) : TABS.filter((t) => !t.gelatoOnly)
   const activeTab = visibleTabs.some((t) => t.id === tab) ? tab : 'all'
 
   // Normalize brand keys so casing/punctuation variants (e.g. "Yacht Fuel" vs "YACHT FUEL") merge
@@ -97,13 +101,38 @@ export default function Customers({ data, book = 'lt' }) {
         </div>
       </div>
 
+      {book === 'gelato' && setGelatoGroup && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '0 0 12px' }}>
+          <div style={{ display: 'inline-flex', border: '1px solid #e2e8f0', borderRadius: 7, overflow: 'hidden' }}>
+            {[['customer', 'By Customer'], ['brand', 'By Brand']].map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => setGelatoGroup(id)}
+                style={{
+                  fontSize: 13.5, padding: '7px 16px', border: 'none', cursor: 'pointer', fontWeight: 500,
+                  borderLeft: id !== 'customer' ? '1px solid #e2e8f0' : 'none',
+                  background: gelatoGroup === id ? '#15803d' : '#fff',
+                  color: gelatoGroup === id ? '#fff' : '#475569',
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+
+
       {activeTab === 'all' && <AllCustomersTab ws={ws} />}
       {activeTab === 'brands' && <BrandsView data={data} brandOf={brandOf} onSelect={(brand) => setModalBrand(brand)} />}
-      {activeTab === 'cadence' && <CadenceTab ws={ws} noBrand={book === 'gelato'} />}
-      {activeTab === 'risk' && <RiskTab ws={ws} noBrand={book === 'gelato'} />}
-      {activeTab === 'declining' && <DecliningTab ws={ws} noBrand={book === 'gelato'} />}
-            {activeTab === 'behavior' && <BehaviorTab ws={ws} noBrand={book === 'gelato'} />}
+      {activeTab === 'cadence' && <CadenceTab ws={ws} noBrand={book === 'gelato' && gelatoGroup !== 'brand'} />}
+      {activeTab === 'risk' && <RiskTab ws={ws} noBrand={book === 'gelato' && gelatoGroup !== 'brand'} />}
+      {activeTab === 'declining' && <DecliningTab ws={ws} noBrand={book === 'gelato' && gelatoGroup !== 'brand'} />}
+            {activeTab === 'behavior' && <BehaviorTab ws={ws} noBrand={book === 'gelato' && gelatoGroup !== 'brand'} />}
       {activeTab === 'customers' && <CustomerListTab data={data} />}
+      {activeTab === 'gelatoCustomers' && <GelatoCustomerListTab data={data} />}
+
 
 
       {modalBrand && (
@@ -122,7 +151,8 @@ export default function Customers({ data, book = 'lt' }) {
 // Editable mirror of the shared customer-list sheet (name + Private Label).
 // Toggling a checkbox writes back to the sheet via an Apps Script web app; the
 // dashboard's private-label bifurcation reflects it on the next data refresh.
-const CUSTOMER_PL_WEBHOOK = 'https://script.google.com/macros/s/AKfycbzvmrlKpyHPueHK7oQQ0BXzWFyEAWSFg9wxDeQlodsjNKW-1OhWC1Lb1JdfMIyLGR-JzA/exec'
+const CUSTOMER_PL_WEBHOOK = 'https://script.google.com/macros/s/AKfycbxFFBW_dL2dg5goaPAeefpb4fQXiIHAJ_I-evJJFT68ACYGCZv0ZeJBEDySG-4-qcUBoA/exec'
+
 
 
 // Pull the order year out of a "Last Order Date" string (handles 2024-..,
@@ -174,9 +204,16 @@ function CustomerListTab({ data }) {
   const plCount = list.filter((c) => c.privateLabel).length
   const oldCount = list.filter(isOld).length
 
+  const custF = useColFilter(rows, (c) => c.name)
+  const plF = useColFilter(rows, (c) => (c.privateLabel ? 'Yes' : 'No'))
   const brandF = useColFilter(rows, (c) => c.brand)
   const repF = useColFilter(rows, (c) => c.salesRep)
-  const shown = rows.filter(brandF.pass).filter(repF.pass)
+  const firstF = useColFilter(rows, (c) => c.firstOrder)
+  const lastF = useColFilter(rows, (c) => c.lastOrder)
+  const ownerF = useColFilter(rows, (c) => c.arOwner)
+  const shown = rows
+    .filter(custF.pass).filter(plF.pass).filter(brandF.pass).filter(repF.pass)
+    .filter(firstF.pass).filter(lastF.pass).filter(ownerF.pass)
 
 
   return (
@@ -202,19 +239,21 @@ function CustomerListTab({ data }) {
           <ExportButton
             filename={`customer-master-list-${new Date().toISOString().slice(0, 10)}.csv`}
             title="Customer master list"
-            headers={['Customer', 'Infused Origin', 'Brand', 'Sales rep', 'First order', 'Last order', 'Total revenue']}
-            rows={shown.map((c) => [c.name, c.privateLabel ? 'Yes' : 'No', c.brand || '', c.salesRep || '', c.firstOrder || '', c.lastOrder || '', c.totalRevenue || 0])}
+            headers={['Customer', 'Infused Origin', 'Brand', 'Sales rep', 'First order', 'Last order', 'Total revenue', 'AR Owner']}
+            rows={shown.map((c) => [c.name, c.privateLabel ? 'Yes' : 'No', c.brand || '', c.salesRep || '', c.firstOrder || '', c.lastOrder || '', c.totalRevenue || 0, c.arOwner || ''])}
+
           />
         </div>
       </div>
       <div className="table-wrap">
         <table className="data-table">
           <thead>
-            <tr><th>Customer</th><th>Infused Origin</th><th>Brand <ColumnFilter label="Brand" options={brandF.options} excluded={brandF.excluded} onChange={brandF.setExcluded} /></th><th>Sales rep <ColumnFilter label="Sales rep" options={repF.options} excluded={repF.excluded} onChange={repF.setExcluded} /></th><th>First order</th><th>Last order</th><th className="num">Total revenue</th></tr>
+            <tr><th>Customer <ColumnFilter label="Customer" options={custF.options} excluded={custF.excluded} onChange={custF.setExcluded} /></th><th>Infused Origin <ColumnFilter label="Infused Origin" options={plF.options} excluded={plF.excluded} onChange={plF.setExcluded} /></th><th>Brand <ColumnFilter label="Brand" options={brandF.options} excluded={brandF.excluded} onChange={brandF.setExcluded} /></th><th>Sales rep <ColumnFilter label="Sales rep" options={repF.options} excluded={repF.excluded} onChange={repF.setExcluded} /></th><th>First order <ColumnFilter label="First order" options={firstF.options} excluded={firstF.excluded} onChange={firstF.setExcluded} /></th><th>Last order <ColumnFilter label="Last order" options={lastF.options} excluded={lastF.excluded} onChange={lastF.setExcluded} /></th><th className="num">Total revenue</th><th>AR Owner <ColumnFilter label="AR Owner" options={ownerF.options} excluded={ownerF.excluded} onChange={ownerF.setExcluded} /></th></tr>
+
 
           </thead>
           <tbody>
-            {shown.length === 0 && <tr><td colSpan="7" className="table-empty">No customers match.</td></tr>}
+            {shown.length === 0 && <tr><td colSpan="8" className="table-empty">No customers match.</td></tr>}
 
             {shown.map((c) => (
 
@@ -252,6 +291,17 @@ function CustomerListTab({ data }) {
                 <td className="muted">{c.lastOrder || ''}</td>
 
                 <td className="num">{c.totalRevenue ? money(c.totalRevenue) : ''}</td>
+                               <td>
+                  <input
+                    type="text"
+                    value={c.arOwner || ''}
+                    onChange={(e) => editLocal(c.name, 'arOwner', e.target.value)}
+                    onBlur={(e) => save(c.name, 'AR Owner', e.target.value)}
+                    style={{ width: '100%', border: '1px solid transparent', background: 'transparent', padding: '2px 4px', borderRadius: 4 }}
+                    onFocus={(e) => { e.target.style.border = '1px solid #cbd5e1'; e.target.style.background = '#fff' }}
+                  />
+                </td>
+ 
               </tr>
             ))}
           </tbody>
@@ -363,7 +413,7 @@ function BrandsView({ data, brandOf, onSelect }) {
             </tr>
           </thead>
           <tbody>
-            {shownBrands.length === 0 && <tr><td colSpan="7" className="table-empty">No brands match.</td></tr>}
+            {shownBrands.length === 0 && <tr><td colSpan="8" className="table-empty">No brands match.</td></tr>}
             {shownBrands.map((b) => (
 
               <tr key={b.brand} className="clickable-row" onClick={() => onSelect(b.brand)}>

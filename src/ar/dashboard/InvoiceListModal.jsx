@@ -4,6 +4,7 @@ import { useNav } from '../lib/navigation.jsx'
 import { ExportButton } from '../lib/csv.jsx'
 import { ColumnFilter, useColFilter } from './components/ColumnFilter.jsx'
 import { keepInOperating, OP_MODES, opExclText } from '../lib/dso.js'
+import { catchAllLast } from '../lib/brands.js'
 import { useAgencyOverrides, getAgency, setAgency } from '../lib/arAgencyOverrides.js'
 import { usePaymentStatus, getPaymentStatus, setPaymentStatus, isReceivedComplete, isPlanComplete, PAYMENT_OPTIONS } from '../lib/arPaymentStatus.js'
 
@@ -158,7 +159,7 @@ export default function InvoiceListModal({ title, subtitle, invoices: allInvoice
     }
     return [...m.values()]
       .map((g) => ({ ...g, agency: [...g.agencies].filter(Boolean).join(' / ') }))
-      .sort((a, b) => (hideOutstanding ? b.invoiced - a.invoiced : b.outstanding - a.outstanding))
+      .sort(catchAllLast((g) => g.brand, (a, b) => (hideOutstanding ? b.invoiced - a.invoiced : b.outstanding - a.outstanding)))
   }, [invoices, hideOutstanding, payCache])
 
   // Gelato (and any list lacking master-list brands) has no masterBrand - skip the
@@ -195,6 +196,21 @@ export default function InvoiceListModal({ title, subtitle, invoices: allInvoice
       .sort((a, b) => (hideOutstanding ? b.invoiced - a.invoiced : b.outstanding - a.outstanding))
   }, [invoices, brandView, hideOutstanding, hasBrands, payCache])
 
+
+  // Make the Brand and Store drill levels searchable + filterable too (the
+  // invoice level already is). Reuses the q/debouncedQ search state.
+  const drillQ = debouncedQ.trim().toLowerCase()
+  const brandColF = useColFilter(brandGroups, (g) => g.brand)
+  const storeColF = useColFilter(storeGroups, (g) => g.vendor.replace(/^(Little Tree|Gelato)-\s*/i, ''))
+  const shownBrandGroups = useMemo(
+    () => (drillQ ? brandGroups.filter((g) => (g.brand || '').toLowerCase().includes(drillQ)) : brandGroups).filter(brandColF.pass),
+    [brandGroups, drillQ, brandColF]
+  )
+  const shownStoreGroups = useMemo(
+    () => (drillQ ? storeGroups.filter((g) => (g.vendor || '').toLowerCase().includes(drillQ)) : storeGroups).filter(storeColF.pass),
+    [storeGroups, drillQ, storeColF]
+  )
+  useEffect(() => { setQ('') }, [brandView, storeView])
 
   const openCount = useMemo(() => invoices.filter(isOpenEff).length, [invoices, payCache])
 
@@ -444,11 +460,21 @@ export default function InvoiceListModal({ title, subtitle, invoices: allInvoice
           ) : null}
 
           {hasBrands && brandView === null && (
+            <>
+            <div className="modal-toolbar">
+              <input
+                type="search"
+                className="table-search"
+                placeholder="Search brand…"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+            </div>
             <div className="modal-table-wrap">
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Brand</th>
+                    <th>Brand <ColumnFilter label="Brand" options={brandColF.options} excluded={brandColF.excluded} onChange={brandColF.setExcluded} /></th>
                     <th className="num"># Invoices</th>
                     <th className="num">Invoiced</th>
                     {!hideOutstanding && <th className="num">Outstanding</th>}
@@ -457,8 +483,8 @@ export default function InvoiceListModal({ title, subtitle, invoices: allInvoice
                   </tr>
                 </thead>
                 <tbody>
-                  {brandGroups.length === 0 && <tr><td colSpan={(hideOutstanding ? 3 : 5) + (hasAgency ? 1 : 0)} className="table-empty">No data.</td></tr>}
-                  {brandGroups.map((g) => (
+                  {shownBrandGroups.length === 0 && <tr><td colSpan={(hideOutstanding ? 3 : 5) + (hasAgency ? 1 : 0)} className="table-empty">No data.</td></tr>}
+                  {shownBrandGroups.map((g) => (
                     <tr key={g.brand} className="clickable-row" onClick={() => { setBrandView(g.brand); setStoreView(null) }}>
 
                       <td className="vendor-cell">{g.brand}</td>
@@ -472,6 +498,7 @@ export default function InvoiceListModal({ title, subtitle, invoices: allInvoice
                 </tbody>
               </table>
             </div>
+            </>
           )}
 
           {storeView === null && (hasBrands ? brandView !== null : true) && (
@@ -483,11 +510,20 @@ export default function InvoiceListModal({ title, subtitle, invoices: allInvoice
               <span className="crumb-current">{brandView}</span>
             </nav>
             )}
+            <div className="modal-toolbar">
+              <input
+                type="search"
+                className="table-search"
+                placeholder="Search store…"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+            </div>
             <div className="modal-table-wrap">
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Store</th>
+                    <th>Store <ColumnFilter label="Store" options={storeColF.options} excluded={storeColF.excluded} onChange={storeColF.setExcluded} /></th>
                     <th className="num"># Invoices</th>
                     <th className="num">Invoiced</th>
                     {!hideOutstanding && <th className="num">Outstanding</th>}
@@ -496,8 +532,8 @@ export default function InvoiceListModal({ title, subtitle, invoices: allInvoice
                   </tr>
                 </thead>
                 <tbody>
-                  {storeGroups.length === 0 && <tr><td colSpan={(hideOutstanding ? 3 : 5) + (hasAgency ? 1 : 0)} className="table-empty">No stores.</td></tr>}
-                  {storeGroups.map((g) => (
+                  {shownStoreGroups.length === 0 && <tr><td colSpan={(hideOutstanding ? 3 : 5) + (hasAgency ? 1 : 0)} className="table-empty">No stores.</td></tr>}
+                  {shownStoreGroups.map((g) => (
                     <tr key={g.vendor} className="clickable-row" onClick={() => setStoreView(g.vendor)}>
                       <td className="vendor-cell">{g.vendor.replace(/^(Little Tree|Gelato)-\s*/i, '')}</td>
                       <td className="num">{num(g.count)}</td>

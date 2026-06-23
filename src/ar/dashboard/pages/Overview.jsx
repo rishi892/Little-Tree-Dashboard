@@ -433,6 +433,7 @@ function DsoByRepCard({ invoices, onOpenList }) {
         return { rep, total, operating, count, opCount, openCount: open.length, outstanding, invoices: invs }
       })
       .filter((r) => r.count > 0 || r.opCount > 0)
+      .filter((r) => r.rep !== 'Unassigned')
       .sort((a, b) => b.operating - a.operating)
   }, [invoices, opCutoff, years, overrides])
 

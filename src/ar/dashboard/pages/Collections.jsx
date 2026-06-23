@@ -4,7 +4,7 @@ import AgingChart from '../AgingChart.jsx'
 import InvoiceTable from '../InvoiceTable.jsx'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, BarChart, Bar, Legend } from 'recharts'
 import { computeAgingBuckets } from '../../lib/metrics.js'
-import { isPrivateLabel } from '../../lib/brands.js'
+import { isPrivateLabel, catchAllLast } from '../../lib/brands.js'
 import { money, num, monthLabel } from '../../lib/format.js'
 import { ExportButton } from '../../lib/csv.jsx'
 import ActionList from './ActionList.jsx'
@@ -132,6 +132,11 @@ function operatorDsoByGroup(arInvoices, getKey) {
 
 const norm = (s) => String(s || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')
 
+// Strip the book prefix ("Little Tree-" / "Gelato-") for display only, tolerating
+// common misspellings of the prefix (Gelatto-, Gellato-, Galato-, …) and
+// hyphen / en-dash / em-dash separators.
+const stripBookPrefix = (v) => String(v || '').replace(/^\s*(little\s*tree+s?|g[ae]l+[ae]t+o*)\s*[-–—]\s*/i, '')
+
 // keepInTotal / keepInOperating now live in ../../lib/dso.js (two-mode model:
 // 'within' = up to 180 days past due, 'over' = more than 180 days past due).
 
@@ -177,7 +182,7 @@ const ALL_TABS = [
   { id: 'year', label: 'By Year' },
   { id: 'reconcile', label: 'Reconciliation' },
 ]
-export default function Collections({ data, scope = 'wholesale' }) {
+export default function Collections({ data, scope = 'wholesale', gelatoGroup = 'customer', setGelatoGroup }) {
   const { openInvoiceList } = useNav()
   // Gelato: no Rep tab (sheet doesn't have salesRep) and no Reconciliation (no fin sheet to compare)
   // Gelato has no rep/reconcile data; and the whole Gelato book is private label,
@@ -396,6 +401,27 @@ export default function Collections({ data, scope = 'wholesale' }) {
     <div className="page">
       <ARTabs tab={tab} setTab={setTab} tabs={TABS} />
 
+      {scope === 'gelato' && setGelatoGroup && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '0 0 12px' }}>
+          <div style={{ display: 'inline-flex', border: '1px solid #e2e8f0', borderRadius: 7, overflow: 'hidden' }}>
+            {[['customer', 'By Customer'], ['brand', 'By Brand']].map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => setGelatoGroup(id)}
+                style={{
+                  fontSize: 13.5, padding: '7px 16px', border: 'none', cursor: 'pointer', fontWeight: 500,
+                  borderLeft: id !== 'customer' ? '1px solid #e2e8f0' : 'none',
+                  background: gelatoGroup === id ? '#15803d' : '#fff',
+                  color: gelatoGroup === id ? '#fff' : '#475569',
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {scope !== 'gelato' && (
         <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '0 0 12px' }}>
           <div style={{ display: 'inline-flex', border: '1px solid #e2e8f0', borderRadius: 7, overflow: 'hidden' }}>
@@ -552,6 +578,7 @@ export default function Collections({ data, scope = 'wholesale' }) {
         outstanding={outstanding.filter(segMatch)}
         dsoInvoices={dsoInvoicesAll.filter(segMatch)}
         scope={scope}
+        gelatoGroup={gelatoGroup}
         years={availableYears}
         dsoYears={dsoYears}
         toggleDsoYear={toggleDsoYear}
@@ -1077,11 +1104,11 @@ function OutstandingByBrand({ invoices }) {
 // ============ DSO TAB (groups Trend + By Rep + By Customer + By Brand) ============
 const brandKeyOf = (r) => r.masterBrand || r.brand || 'No brand'
 
-function DsoTab({ arInvoices, outstanding, dsoInvoices, scope, years = [], dsoYears, toggleDsoYear, opCutoff, setOpCutoff }) {
+function DsoTab({ arInvoices, outstanding, dsoInvoices, scope, gelatoGroup = 'customer', years = [], dsoYears, toggleDsoYear, opCutoff, setOpCutoff }) {
   const { openInvoiceList } = useNav()
   // Gelato sheet has no sales rep → no By-Rep sub-tab there.
   const SUBS = scope === 'gelato'
-    ? [{ id: 'trend', label: 'Trend' }, { id: 'customer', label: 'By Customer' }, { id: 'brand', label: 'By Brand' }]
+    ? [{ id: 'trend', label: 'Trend' }, { id: 'customer', label: 'Customer' }]
     : [{ id: 'trend', label: 'Trend' }, { id: 'rep', label: 'By Rep' }, { id: 'customer', label: 'By Customer' }, { id: 'brand', label: 'By Brand' }]
   const [sub, setSub] = useState('trend')
   const active = SUBS.some((s) => s.id === sub) ? sub : 'trend'
@@ -1240,7 +1267,11 @@ function DsoTab({ arInvoices, outstanding, dsoInvoices, scope, years = [], dsoYe
       </div>
       {active === 'trend' && <DsoTrendTab allInvoices={dsoSet} scope={scope} />}
       {active === 'rep' && <ByRepTab allInvoices={dsoSet} outstanding={outSet} opCutoff={opCutoff} />}
-      {active === 'customer' && <ByCustomerTab arInvoices={arSet} outstanding={outSet} opCutoff={opCutoff} />}
+      {active === 'customer' && (
+        scope === 'gelato' && gelatoGroup === 'brand'
+          ? <ByBrandTab arInvoices={arSet} outstanding={outSet} opCutoff={opCutoff} />
+          : <ByCustomerTab arInvoices={arSet} outstanding={outSet} opCutoff={opCutoff} />
+      )}
       {active === 'brand' && <ByBrandTab arInvoices={arSet} outstanding={outSet} opCutoff={opCutoff} />}
     </>
   )
@@ -1340,7 +1371,7 @@ function ByCustomerTab({ arInvoices, outstanding, opCutoff = 'within' }) {
             {shown.length === 0 && <tr><td colSpan="8" className="table-empty">No customers with open balances.</td></tr>}
             {shown.map((r) => (
               <tr key={r.vendor} className="clickable-row" onClick={() => openCustomer(r.vendor)}>
-                <td className="vendor-cell">{r.vendor.replace(/^Little Tree-\s*/i, '')}</td>
+                <td className="vendor-cell">{stripBookPrefix(r.vendor)}</td>
                 <td>{r.salesRep}</td>
                 <td className="num">{r.count}</td>
                 <td className="num cell-warn">{money(r.outstanding, true)}</td>
@@ -1396,32 +1427,38 @@ function PrivateLabelTab({ arInvoices, outstanding }) {
 // ============ BY BRAND TAB ============
 function ByBrandTab({ arInvoices, outstanding, opCutoff = 'within' }) {
   const overrides = useOverrides()
+  const { openInvoiceList } = useNav()
   const norm = (s) => String(s || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')
+  // Prefer the customer master-list brand (masterBrand) over the invoice's own
+  // brand, so Gelato groups by its real brands instead of a single "Gelato".
+  const brandRaw = (r) => r.masterBrand || r.brand || ''
   // Build vendor → brand once (used by both DSO computation and aggregation).
   const vendorBrand = useMemo(() => {
     const m = new Map()
     arInvoices.forEach((r) => {
-      if (r.vendor && r.brand && !m.has(r.vendor)) m.set(r.vendor, r.brand)
+      const b = brandRaw(r)
+      if (r.vendor && b && !m.has(r.vendor)) m.set(r.vendor, b)
     })
     return m
   }, [arInvoices])
   // Total + Operating DSO per brand (Operating uses the chosen cutoff).
   const dsoMap = useMemo(() => dsoBothByGroup(arInvoices, (r) => {
-    const raw = vendorBrand.get(r.vendor) || r.brand || ''
+    const raw = vendorBrand.get(r.vendor) || brandRaw(r)
     return raw ? norm(raw) : 'unbranded'
   }, opCutoff), [arInvoices, vendorBrand, opCutoff, overrides])
 
   const rows = useMemo(() => {
     const display = new Map()
     arInvoices.forEach((r) => {
-      if (!r.brand) return
-      const k = norm(r.brand)
-      if (!display.has(k)) display.set(k, r.brand.trim())
+      const b = brandRaw(r)
+      if (!b) return
+      const k = norm(b)
+      if (!display.has(k)) display.set(k, b.trim())
     })
 
     const map = new Map()
     outstanding.forEach((r) => {
-      const raw = vendorBrand.get(r.vendor) || r.brand || ''
+      const raw = vendorBrand.get(r.vendor) || brandRaw(r)
       const key = raw ? norm(raw) : 'unbranded'
       const name = raw ? display.get(key) || raw : 'Unbranded'
       const cur = map.get(key) || {
@@ -1444,7 +1481,7 @@ function ByBrandTab({ arInvoices, outstanding, opCutoff = 'within' }) {
           opDso: d.operating || 0,
         }
       })
-      .sort((a, b) => b.outstanding - a.outstanding)
+      .sort(catchAllLast((c) => c.brand, (a, b) => b.outstanding - a.outstanding))
   }, [arInvoices, outstanding, vendorBrand, dsoMap])
 
   const brandF = useColFilter(rows, (r) => r.brand)
@@ -1464,7 +1501,7 @@ function ByBrandTab({ arInvoices, outstanding, opCutoff = 'within' }) {
     for (const b of shown) {
       out.push(['Brand', b.brand, '', '', '', '', '', b.outstanding.toFixed(2), b.count, b.dso > 0 ? `${b.dso.toFixed(0)}d` : '', b.opDso > 0 ? `${b.opDso.toFixed(0)}d` : ''])
       const brandInvs = outstanding.filter((r) => {
-        const raw = vendorBrand.get(r.vendor) || r.brand || ''
+        const raw = vendorBrand.get(r.vendor) || brandRaw(r)
         return (raw ? norm(raw) : 'unbranded') === b.brandKey
       })
       const byStore = new Map()
@@ -1519,7 +1556,13 @@ function ByBrandTab({ arInvoices, outstanding, opCutoff = 'within' }) {
           <tbody>
             {shown.length === 0 && <tr><td colSpan="7" className="table-empty">No open balances.</td></tr>}
             {shown.map((r) => (
-              <tr key={r.brand}>
+              <tr key={r.brand} className="clickable-row" onClick={() => {
+                const invs = outstanding.filter((rr) => {
+                  const raw = vendorBrand.get(rr.vendor) || brandRaw(rr)
+                  return (raw ? norm(raw) : 'unbranded') === r.brandKey
+                })
+                if (invs.length) openInvoiceList({ title: r.brand, subtitle: `${invs.length} open invoices · ${money(r.outstanding)}`, invoices: invs, hideBrandLevel: true })
+              }}>
                 <td className="vendor-cell">{r.brand}</td>
                 <td className="num">{r.customerCount}</td>
                 <td className="num">{r.count}</td>

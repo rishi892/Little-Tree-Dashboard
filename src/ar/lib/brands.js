@@ -12,6 +12,20 @@ function normalize(s) {
   return String(s || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 
+// Catch-all brand buckets ("Uncategorized Brand", "No brand", "Unbranded", blank)
+// always sort to the BOTTOM of any brand-grouped report, regardless of value.
+export const isCatchAllBrand = (b) => {
+  const s = String(b || '').trim().toLowerCase()
+  return s === '' || s.includes('uncategor') || s === 'no brand' || s === 'unbranded'
+}
+// Comparator wrapper: keeps `cmp` ordering but pushes catch-all brands last.
+// `getBrand` pulls the brand name from each row.
+export const catchAllLast = (getBrand, cmp) => (a, b) => {
+  const au = isCatchAllBrand(getBrand(a)), bu = isCatchAllBrand(getBrand(b))
+  if (au !== bu) return au ? 1 : -1
+  return cmp(a, b)
+}
+
 export function isPrivateLabel(brand) {
   return NORMALIZED_PL.has(normalize(brand))
 }

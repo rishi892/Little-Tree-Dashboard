@@ -15,6 +15,8 @@ import ErrorBoundary from './ErrorBoundary.jsx'
 import LoadingSkeleton from './LoadingSkeleton.jsx'
 import { NavProvider, useNav } from '../lib/navigation.jsx'
 import useSheets from '../lib/useSheets.js'
+import { attachGelatoBrand } from '../lib/sheets.js'
+import GelatoBrandDrillModal from './GelatoBrandDrillModal.jsx'
 import { scopeDataToRep, repForUser } from '../lib/repScope.js'
 import { usePaymentStatus, tagPaymentStatus } from '../lib/arPaymentStatus.js'
 
@@ -56,6 +58,9 @@ export default function Dashboard({ onLogout }) {
 
     Object.keys(PAGES)
   const [active, setActive] = useState(allowedPages[0])
+  const [gelatoArGroup, setGelatoArGroup] = useState('customer')     // Gelato AR page
+  const [gelatoCustGroup, setGelatoCustGroup] = useState('customer') // Gelato Customers page
+
   const { data, loading, refreshing, error, refresh } = useSheets()
 
   // Sales-rep scoping: staff like Manny/Dave/Joe/Ken see ONLY their own
@@ -70,6 +75,23 @@ export default function Dashboard({ onLogout }) {
   const paymentCache = usePaymentStatus()
   const taggedData = useMemo(() => tagPaymentStatus(data, paymentCache), [data, paymentCache])
   const scopedData = useMemo(() => (rep && taggedData ? scopeDataToRep(taggedData, rep) : taggedData), [taggedData, rep])
+  // Gelato By-Brand toggle: when active on a Gelato page, regroup the Gelato book
+  // by brand before it reaches the page AND the drill-down modals.
+  // Each Gelato page owns its own By-Customer/By-Brand state; the active page's
+  // choice drives the regroup that feeds both the page and the drill-down modals.
+  // Customers page By-Brand → collapse stores into brand rows (insight tabs group
+  // by vendor). AR page By-Brand → keep stores, just attach the brand so the
+  // native Brand → Store → Invoice drills (Action List, modal) light up.
+  // Both Gelato pages, By-Brand: keep each invoice's real store but attach its
+  // brand (masterBrand), so the native Brand → Store drills + brand-status
+  // rollups (a brand is only churned when ALL its stores are) light up like LT.
+  const customersBrandMode = active === 'gelato-customers' && gelatoCustGroup === 'brand'
+  const arBrandMode = active === 'gelato' && gelatoArGroup === 'brand'
+  const viewData = useMemo(
+    () => ((customersBrandMode || arBrandMode) ? attachGelatoBrand(scopedData) : scopedData),
+    [scopedData, customersBrandMode, arBrandMode]
+  )
+
 
   // Tell the export buttons which book they're on, so reports pick the right
   // logo/accent (Gelato pages → Gelato branding, everything else → Little Tree).
@@ -113,25 +135,55 @@ export default function Dashboard({ onLogout }) {
                     pages - the new page renders fully, then a 160ms fade
                     smooths over any blank frame from heavy useMemos. */}
                 <div className="page-fade">
-                  <PageRouter active={active} data={scopedData} />
+                  <PageRouter active={active} data={viewData}
+                    gelatoArGroup={gelatoArGroup} setGelatoArGroup={setGelatoArGroup}
+                    gelatoCustGroup={gelatoCustGroup} setGelatoCustGroup={setGelatoCustGroup} />
+
                 </div>
               </ErrorBoundary>
             )}
           </main>
         </div>
-        {scopedData && <GlobalModals data={scopedData} book={active === 'gelato' || active === 'gelato-customers' ? 'purex' : 'lt'} />}
+        {scopedData && <GlobalModals
+          data={viewData}
+          book={active === 'gelato' || active === 'gelato-customers' ? 'purex' : 'lt'}
+          gelatoBrandMode={false}
+          rawGelato={scopedData.gelato}
+        />}
       </div>
     </NavProvider>
   )
 }
 
-function PageRouter({ active, data }) {
+function PageRouter({ active, data, gelatoArGroup, setGelatoArGroup, gelatoCustGroup, setGelatoCustGroup }) {
   const PageComponent = PAGES[active].component
-  return <PageComponent data={data} />
+  // Expose each Gelato page's OWN state under the prop names the pages already use.
+  const gelatoGroup = active === 'gelato' ? gelatoArGroup : gelatoCustGroup
+  const setGelatoGroup = active === 'gelato' ? setGelatoArGroup : setGelatoCustGroup
+  return <PageComponent data={data} gelatoGroup={gelatoGroup} setGelatoGroup={setGelatoGroup} />
 }
 
-function GlobalModals({ data, book }) {
+
+function GlobalModals({ data, book, gelatoBrandMode = false, rawGelato = [] }) {
   const { customerVendor, closeCustomer, invoiceList, closeInvoiceList, canGoBack, back } = useNav()
+
+  // In Gelato By-Brand mode, the detail modal receives brand-collapsed invoices
+  // (vendor = brand). Swap them back to their original store-level rows and
+  // attach masterBrand so InvoiceListModal drills Brand → Store → Invoice
+  // instead of stopping at the brand.
+  const rawByInv = useMemo(() => {
+    const m = new Map()
+    ;(rawGelato || []).forEach((r) => { if (r.invNo) m.set(r.invNo, r) })
+    return m
+  }, [rawGelato])
+  const invoiceListFixed = useMemo(() => {
+    if (!invoiceList || !gelatoBrandMode) return invoiceList
+    const invoices = (invoiceList.invoices || []).map((r) => {
+      const raw = rawByInv.get(r.invNo)
+      return raw ? { ...raw, masterBrand: raw.gelatoBrand || 'No brand' } : r
+    })
+    return { ...invoiceList, invoices }
+  }, [invoiceList, gelatoBrandMode, rawByInv])
 
   // Order matters: list-style modals first, customer-profile last so it
   // renders on top when nested (e.g. region → review → customer).
@@ -150,7 +202,7 @@ function GlobalModals({ data, book }) {
         <InvoiceListModal
           title={invoiceList.title}
           subtitle={invoiceList.subtitle}
-          invoices={invoiceList.invoices}
+          invoices={invoiceListFixed.invoices}
           hideOutstanding={invoiceList.hideOutstanding}
           noYearFilter={invoiceList.noYearFilter}
           hideBrandLevel={invoiceList.hideBrandLevel}
@@ -163,7 +215,10 @@ function GlobalModals({ data, book }) {
         />
       )}
       <CustomerReviewList />
-      {customerVendor && <CustomerProfile data={data} vendor={customerVendor} book={book} onClose={closeCustomer} />}
+      {customerVendor && (gelatoBrandMode
+        ? <GelatoBrandDrillModal brand={customerVendor} gelato={rawGelato} onClose={closeCustomer} />
+        : <CustomerProfile data={data} vendor={customerVendor} book={book} onClose={closeCustomer} />
+      )}
     </>
   )
 }

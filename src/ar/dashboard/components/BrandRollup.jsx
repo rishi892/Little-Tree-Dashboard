@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { num } from '../../lib/format.js'
 import { ExportButton } from '../../lib/csv.jsx'
+import { catchAllLast } from '../../lib/brands.js'
 
 // Brand-first wrapper for any per-store/per-customer table.
 //
@@ -37,7 +38,7 @@ export default function BrandRollup({ rows, brandOf, vendorKey = 'vendor', colum
       count: g.rows.length,
       cells: columns.map((c) => c.agg(g.rows)),
     }))
-    return list.sort((a, b) => (b.cells[0]?.sortVal ?? b.count) - (a.cells[0]?.sortVal ?? a.count))
+    return list.sort(catchAllLast((g) => g.brand, (a, b) => (b.cells[0]?.sortVal ?? b.count) - (a.cells[0]?.sortVal ?? a.count)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, columns])
 
