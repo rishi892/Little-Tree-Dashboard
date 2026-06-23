@@ -480,7 +480,7 @@ app.get('/api/past-weeks-grid', async (_req, res, next) => {
  try {
   const { listSnapshots } = await import('./weeklySnapshots.js');
   const { getWeekActuals } = await import('./snapshotActuals.js');
-  const { getWeekExpensesByLine, getExpectedInflowByWeek } = await import('./weeklyActuals.js');
+  const { getWeeklyExpensesForWeeks, getExpectedInflowByWeek } = await import('./weeklyActuals.js');
   const ymd = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
   const addDaysUtc = (d: Date, n: number) => { const r = new Date(d); r.setUTCDate(d.getUTCDate() + n); return r; };
   const todayD = new Date();
@@ -516,12 +516,14 @@ app.get('/api/past-weeks-grid', async (_req, res, next) => {
    };
   }));
 
-  // QB per-category expenses: sequential per week. Each call fetches a fresh
-  // token internally (same path as the working drill-downs) so we never fire N
-  // concurrent token refreshes / P&L reports. Cached 24h per week.
-  for (const it of items) {
-   try { it.qbExpenses = await getWeekExpensesByLine(it.monday as string, it.weekEnd as string); }
-   catch (e) { it.qbExpenses = null; it.qbErr = e instanceof Error ? e.message : String(e); }
+  // QB per-category expenses: ONE P&L report (summarize_column_by=Week) for the
+  // whole window, mapped per week. One token, one call - fast. Cached 6h.
+  try {
+   const wexp = await getWeeklyExpensesForWeeks(mondays.map((m) => ({ start: m.monday, end: m.weekEnd })));
+   const byStart = new Map(wexp.map((w) => [w.weekStart, w]));
+   for (const it of items) it.qbExpenses = byStart.get(it.monday as string) ?? null;
+  } catch (e) {
+   (items[0] ?? {}).qbErr = e instanceof Error ? e.message : String(e);
   }
   res.json({ count: items.length, items });
  } catch (err) { next(err); }

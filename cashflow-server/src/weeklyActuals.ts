@@ -1,16 +1,17 @@
 /**
- * Weekly ACTUALS that the live cashflow recompute can't give for past weeks:
+ * Weekly ACTUALS the live cashflow recompute can't give for past weeks:
  *
- *  1. getWeekExpensesByLine - actual EXPENSES for a closed week, pulled from
- *     QuickBooks (P&L, Cash basis) and bucketed into the same outflow lines the
- *     13-week budget uses (Payroll / Inventory & Raw Materials / Software &
- *     Subscriptions / Other Expenses). Lets the Actual tab show real per-line
- *     spend instead of "entry yet to be done".
+ *  1. getWeeklyExpensesForWeeks - actual EXPENSES per closed week, pulled from
+ *     QuickBooks in ONE P&L report (Cash basis, summarize_column_by=Week) and
+ *     bucketed into the same outflow lines the 13-week budget uses (Payroll /
+ *     Inventory & Raw Materials / Software & Subscriptions / Other Expenses).
+ *     One report for the whole window = fast + one token (per-week reports
+ *     timed the serverless function out).
  *
  *  2. getExpectedInflowByWeek - the EXPECTED collection schedule for a set of
  *     weeks, computed live from invoice terms (Gelato issue + Net 97, other AR
- *     issue + Net 90). Lets the Past tab show an inflow plan even for weeks that
- *     have no captured snapshot.
+ *     issue + Net 90). Lets the Past tab show an inflow plan even for weeks with
+ *     no captured snapshot.
  */
 
 import { QBO_API_BASE } from './config.js';
@@ -22,6 +23,12 @@ import { getArOpen } from './ar.js';
 
 // --- 1. Weekly QB expenses by budget line ---------------------------------
 
+export type BudgetOutLine =
+  | 'Payroll'
+  | 'Inventory & Raw Materials'
+  | 'Software & Subscriptions'
+  | 'Other Expenses';
+
 export type WeekExpenseLines = {
   weekStart: string;
   weekEnd: string;
@@ -29,95 +36,99 @@ export type WeekExpenseLines = {
   total: number;
 };
 
-export type BudgetOutLine =
-  | 'Payroll'
-  | 'Inventory & Raw Materials'
-  | 'Software & Subscriptions'
-  | 'Other Expenses';
-
 const PAYROLL_KW = [
   'payroll', 'salary', 'salaries', 'wage', 'wages', 'compensation', 'gusto',
   'contractor', 'contractors', 'fiverr', 'upwork', 'cost of labor', 'cost of labour',
   'production payroll', 'remuneration', 'team costs', 'employer payroll', 'employee welfare',
 ];
 
-/** Map a P&L leaf (account name + its ancestor section names) to a budget line. */
 function classifyBudgetLine(leafName: string, ancestors: string[]): BudgetOutLine {
   const leaf = leafName.toLowerCase();
   const hay = `${leaf} ${ancestors.join(' ').toLowerCase()}`;
-  // Payroll catches employee-name leaves via their parent section
-  // ("Cost of labor - COGS", "Payroll & Team costs", ...).
   if (PAYROLL_KW.some((k) => hay.includes(k))) return 'Payroll';
   if (/supplies\s*&\s*materials|raw material|^inventory|inventory asset/.test(leaf)) return 'Inventory & Raw Materials';
   if (/software|subscription|saas/.test(leaf)) return 'Software & Subscriptions';
   return 'Other Expenses';
 }
 
-type PlNode = {
-  Header?: { ColData?: Array<{ value?: string }> };
-  ColData?: Array<{ value?: string }>;
-  Rows?: { Row?: PlNode[] };
-  Summary?: unknown;
-};
+type PlCol = { ColTitle?: string; MetaData?: Array<{ Name?: string; Value?: string }> };
+type PlNode = { Header?: { ColData?: Array<{ value?: string }> }; ColData?: Array<{ value?: string }>; Rows?: { Row?: PlNode[] } };
 
-/** Walk a single-column (Total) P&L report, returning every leaf account with
- *  its amount and the chain of section names above it. */
-function walkPlLeaves(report: { Columns?: { Column: unknown[] }; Rows?: { Row?: PlNode[] } }): Array<{ name: string; amount: number; ancestors: string[] }> {
-  const totalIdx = Math.max((report.Columns?.Column?.length ?? 2) - 1, 1); // last column = Total
-  const out: Array<{ name: string; amount: number; ancestors: string[] }> = [];
+const emptyLines = (): Record<BudgetOutLine, number> => ({
+  'Payroll': 0, 'Inventory & Raw Materials': 0, 'Software & Subscriptions': 0, 'Other Expenses': 0,
+});
+
+/** Parse a multi-column (summarize_column_by=Week) P&L into per-week lines,
+ *  aligned to the caller's Mon-Sun weeks by each column's StartDate. */
+function parseWeeklyPl(report: { Columns?: { Column?: PlCol[] }; Rows?: { Row?: PlNode[] } }, weeks: Array<{ start: string; end: string }>): WeekExpenseLines[] {
+  const result: WeekExpenseLines[] = weeks.map((w) => ({ weekStart: w.start, weekEnd: w.end, byLine: emptyLines(), total: 0 }));
+  const cols = report.Columns?.Column ?? [];
+  // Period columns carry a StartDate in MetaData; the leading "" and trailing
+  // "Total" columns don't. Map each period column to one of our weeks.
+  const periods: Array<{ idx: number; week: number }> = [];
+  cols.forEach((c, idx) => {
+    const sd = (c.MetaData ?? []).find((m) => m.Name === 'StartDate')?.Value;
+    if (!sd) return;
+    const pd = new Date(sd + 'T00:00:00Z');
+    const w = weeks.findIndex((wk) => {
+      const ws = new Date(wk.start + 'T00:00:00Z');
+      const we = new Date(wk.end + 'T23:59:59Z');
+      return pd >= ws && pd <= we;
+    });
+    periods.push({ idx, week: w });
+  });
   const walk = (rows: PlNode[], ancestors: string[]) => {
     for (const row of rows) {
       const hasChildren = (row.Rows?.Row?.length ?? 0) > 0;
-      const sectionName = row.Header?.ColData?.[0]?.value ?? '';
+      const section = row.Header?.ColData?.[0]?.value ?? '';
       if (hasChildren) {
-        walk(row.Rows!.Row!, sectionName ? [...ancestors, sectionName] : ancestors);
+        walk(row.Rows!.Row!, section ? [...ancestors, section] : ancestors);
       } else if (row.ColData) {
         const name = row.ColData[0]?.value ?? '';
-        const amt = parseFloat(row.ColData[totalIdx]?.value ?? '0');
-        if (name && Number.isFinite(amt) && amt !== 0) out.push({ name, amount: amt, ancestors });
+        if (!name) continue;
+        const path = ancestors.join(' ').toLowerCase();
+        if (/income|revenue|sales of product/.test(path) && !/cost of/.test(path)) continue; // skip income side
+        const line = classifyBudgetLine(name, ancestors);
+        for (const p of periods) {
+          if (p.week < 0) continue;
+          const v = Math.abs(parseFloat(row.ColData[p.idx]?.value ?? '0'));
+          if (Number.isFinite(v) && v !== 0) { result[p.week].byLine[line] += v; result[p.week].total += v; }
+        }
       }
     }
   };
   walk(report.Rows?.Row ?? [], []);
-  return out;
+  for (const r of result) {
+    for (const k of Object.keys(r.byLine) as BudgetOutLine[]) r.byLine[k] = +r.byLine[k].toFixed(2);
+    r.total = +r.total.toFixed(2);
+  }
+  return result;
 }
 
-async function _weekExpensesUncached(weekStart: string, weekEnd: string): Promise<WeekExpenseLines> {
+async function _weeklyExpensesUncached(weeks: Array<{ start: string; end: string }>): Promise<WeekExpenseLines[]> {
+  if (weeks.length === 0) return [];
+  const sorted = [...weeks].sort((a, b) => a.start.localeCompare(b.start));
+  const start = sorted[0].start;
+  const end = sorted[sorted.length - 1].end;
   const tok = await getValidAccessToken();
   const url = `${QBO_API_BASE}/v3/company/${tok.realmId}/reports/ProfitAndLoss`
-    + `?start_date=${weekStart}&end_date=${weekEnd}&accounting_method=Cash&minorversion=70`;
+    + `?start_date=${start}&end_date=${end}&summarize_column_by=Week&accounting_method=Cash&minorversion=70`;
   const res = await qboFetch(url, tok.accessToken);
-  if (!res.ok) throw new Error(`QBO P&L ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`QBO weekly P&L ${res.status}: ${await res.text()}`);
   const json = await res.json();
-  const leaves = walkPlLeaves(json);
-  const byLine: Record<BudgetOutLine, number> = {
-    'Payroll': 0, 'Inventory & Raw Materials': 0, 'Software & Subscriptions': 0, 'Other Expenses': 0,
-  };
-  let total = 0;
-  for (const lf of leaves) {
-    // P&L expenses show as positive amounts under expense/COGS sections; income
-    // sections also appear. Only count expense-side leaves (positive spend).
-    // Income leaves live under sections whose name includes "income"/"revenue".
-    const path = lf.ancestors.join(' ').toLowerCase();
-    const isIncome = /income|revenue|sales of product/.test(path) && !/cost of/.test(path);
-    if (isIncome) continue;
-    const amt = Math.abs(lf.amount);
-    if (amt === 0) continue;
-    byLine[classifyBudgetLine(lf.name, lf.ancestors)] += amt;
-    total += amt;
-  }
-  for (const k of Object.keys(byLine) as BudgetOutLine[]) byLine[k] = +byLine[k].toFixed(2);
-  return { weekStart, weekEnd, byLine, total: +total.toFixed(2) };
+  return parseWeeklyPl(json, weeks);
 }
 
-/** Actual QB expenses for a (closed) week, bucketed into budget outflow lines.
- *  Durable-cached per week - closed weeks don't change. */
-export async function getWeekExpensesByLine(weekStart: string, weekEnd: string): Promise<WeekExpenseLines> {
+/** Actual QB expenses per week for the given Mon-Sun weeks, bucketed into the
+ *  budget outflow lines. ONE P&L report. Durable-cached by range (6h). */
+export async function getWeeklyExpensesForWeeks(weeks: Array<{ start: string; end: string }>): Promise<WeekExpenseLines[]> {
+  if (weeks.length === 0) return [];
+  const key = `weekly-expenses:${weeks[weeks.length - 1].start}:${weeks[0].end}`;
   const { data } = await withDurableCache(
-    `week-expenses:${weekStart}`,
-    24 * 60 * 60 * 1000, // 24h - a closed week's P&L is settled
-    () => _weekExpensesUncached(weekStart, weekEnd),
-    (d) => d.total >= 0, // any non-error result (even a $0 week) is cacheable
+    key,
+    6 * 60 * 60 * 1000,
+    () => _weeklyExpensesUncached(weeks),
+    (d) => Array.isArray(d) && d.length > 0,
     false,
   );
   return data;
@@ -150,9 +161,9 @@ function parseAnyDate(s: string | undefined): Date | null {
   return null;
 }
 
-/** Expected AR collections per week, by invoice terms. weeks must be Mon-Sun
- *  ranges (start/end YYYY-MM-DD). Uses ALL Gelato invoices (pending + paid) so
- *  past weeks are covered, plus open non-Gelato AR. */
+/** Expected AR collections per week, by invoice terms. weeks = Mon-Sun ranges.
+ *  Uses ALL Gelato invoices (pending + paid) so past weeks are covered, plus
+ *  open non-Gelato AR. */
 export async function getExpectedInflowByWeek(weeks: Array<{ start: string; end: string }>): Promise<ExpectedInflowWeek[]> {
   const out: ExpectedInflowWeek[] = weeks.map(() => ({ gelato: 0, other: 0, total: 0 }));
   const idxFor = (d: Date): number => {
