@@ -349,7 +349,7 @@ export function CashFlow13Week() {
  <div className="page-sub">
  {direction === 'future'
  ? <>Rolling 13-week plan · Wk 1 starts Mon <strong>{data.anchor}</strong> (auto-rolls forward each Monday) · Wk 1 opening cash <strong>{formatCurrency(openingCashWk1)}</strong></>
- : <>Trailing 13 weeks · <strong>Wk -1</strong> = most recent closed week (Mon <strong>{data.anchor}</strong>), then Wk -2, Wk -3 ... going back. Current in-progress week lives in the Future tab.</>
+ : <>Trailing 13 weeks · <strong>Wk -1</strong> = most recent closed week (Mon <strong>{data.anchor}</strong>), then Wk -2, Wk -3 ... going back. Current in-progress week lives in the Budgeted tab.</>
  }
  {data.cached && ' · cached'}
  </div>
@@ -368,7 +368,7 @@ export function CashFlow13Week() {
  style={{ borderRadius: 0, border: 'none' }}
  onClick={() => setDirection('future')}
  >
- Future 13W
+ Budgeted 13W
  </button>
  </div>
  <button className="btn ghost" onClick={() => load(true)} disabled={loading}>
@@ -1203,7 +1203,7 @@ function PastCashflowTable({
  return (
   <CollapsibleSection
    title={`Past weeks · projection vs actual (${items.length} closed week${items.length === 1 ? '' : 's'})`}
-   sub={<>Closed weeks only - "Wk -1" = the most recent Sunday, then "Wk -2", "Wk -3"... going back. Each cell shows <strong>fc</strong> (snapshot frozen that Monday, where captured) over <strong>actual</strong> (sales invoiced + AR collected per LT Financials in that range) over <strong>Δ</strong> (variance). The current in-progress week lives in the Future tab as its Wk 1.</>}
+   sub={<>Closed weeks only - "Wk -1" = the most recent Sunday, then "Wk -2", "Wk -3"... going back. Each cell shows <strong>fc</strong> (snapshot frozen that Monday, where captured) over <strong>actual</strong> (sales invoiced + AR collected per LT Financials in that range) over <strong>Δ</strong> (variance). The current in-progress week lives in the Budgeted tab as its Wk 1.</>}
   >
    <div className="table-wrap">
    <table className="data-table" style={{ fontSize: 12 }}>
