@@ -15,6 +15,7 @@
 
 import { QBO_API_BASE } from './config.js';
 import { qboFetch } from './qbHttp.js';
+import { getValidAccessToken } from './oauth.js';
 import { withDurableCache } from './qbCache.js';
 import { getGelatoAr } from './gelatoAr.js';
 import { getArOpen } from './ar.js';
@@ -81,7 +82,8 @@ function walkPlLeaves(report: { Columns?: { Column: unknown[] }; Rows?: { Row?: 
   return out;
 }
 
-async function _weekExpensesUncached(weekStart: string, weekEnd: string, tok: { accessToken: string; realmId: string }): Promise<WeekExpenseLines> {
+async function _weekExpensesUncached(weekStart: string, weekEnd: string): Promise<WeekExpenseLines> {
+  const tok = await getValidAccessToken();
   const url = `${QBO_API_BASE}/v3/company/${tok.realmId}/reports/ProfitAndLoss`
     + `?start_date=${weekStart}&end_date=${weekEnd}&accounting_method=Cash&minorversion=70`;
   const res = await qboFetch(url, tok.accessToken);
@@ -110,11 +112,11 @@ async function _weekExpensesUncached(weekStart: string, weekEnd: string, tok: { 
 
 /** Actual QB expenses for a (closed) week, bucketed into budget outflow lines.
  *  Durable-cached per week - closed weeks don't change. */
-export async function getWeekExpensesByLine(weekStart: string, weekEnd: string, tok: { accessToken: string; realmId: string }): Promise<WeekExpenseLines> {
+export async function getWeekExpensesByLine(weekStart: string, weekEnd: string): Promise<WeekExpenseLines> {
   const { data } = await withDurableCache(
     `week-expenses:${weekStart}`,
     24 * 60 * 60 * 1000, // 24h - a closed week's P&L is settled
-    () => _weekExpensesUncached(weekStart, weekEnd, tok),
+    () => _weekExpensesUncached(weekStart, weekEnd),
     (d) => d.total >= 0, // any non-error result (even a $0 week) is cacheable
     false,
   );

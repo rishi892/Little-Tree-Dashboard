@@ -481,7 +481,6 @@ app.get('/api/past-weeks-grid', async (_req, res, next) => {
   const { listSnapshots } = await import('./weeklySnapshots.js');
   const { getWeekActuals } = await import('./snapshotActuals.js');
   const { getWeekExpensesByLine, getExpectedInflowByWeek } = await import('./weeklyActuals.js');
-  const { getValidAccessToken } = await import('./oauth.js');
   const ymd = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
   const addDaysUtc = (d: Date, n: number) => { const r = new Date(d); r.setUTCDate(d.getUTCDate() + n); return r; };
   const todayD = new Date();
@@ -517,15 +516,12 @@ app.get('/api/past-weeks-grid', async (_req, res, next) => {
    };
   }));
 
-  // QB per-category expenses: one token, sequential per week so we don't fire
-  // N concurrent P&L reports (QB rate-limits reports). Cached 24h per week.
-  let tok: { accessToken: string; realmId: string } | null = null;
-  try { tok = await getValidAccessToken(); } catch { tok = null; }
-  if (tok) {
-   for (const it of items) {
-    try { it.qbExpenses = await getWeekExpensesByLine(it.monday as string, it.weekEnd as string, tok); }
-    catch (e) { it.qbExpenses = null; it.qbErr = e instanceof Error ? e.message : String(e); }
-   }
+  // QB per-category expenses: sequential per week. Each call fetches a fresh
+  // token internally (same path as the working drill-downs) so we never fire N
+  // concurrent token refreshes / P&L reports. Cached 24h per week.
+  for (const it of items) {
+   try { it.qbExpenses = await getWeekExpensesByLine(it.monday as string, it.weekEnd as string); }
+   catch (e) { it.qbExpenses = null; it.qbErr = e instanceof Error ? e.message : String(e); }
   }
   res.json({ count: items.length, items });
  } catch (err) { next(err); }
