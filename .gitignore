@@ -46,3 +46,6 @@ tunnel*.log
 
 # Claude Code local settings (personal - may contain pasted tokens)
 .claude/settings.local.json
+
+# GitHub Actions workflow (needs a workflow-scoped token to push)
+.github/
