@@ -296,7 +296,7 @@ app.get('/api/subscription-audit', async (req, res, next) => {
 });
 
 // Recurring subscriptions detected from QBO transaction history.
-const RECURRING_TTL_MS = 60 * 60 * 1000;
+const RECURRING_TTL_MS = 30 * 60 * 1000;
 let recurringCache: { at: number; data: RecurringResult } | null = null;
 let recurringInFlight: Promise<RecurringResult> | null = null;
 
@@ -331,7 +331,7 @@ app.get('/api/recurring-subscriptions', async (req, res, next) => {
 });
 
 // Live expense detail - heavy (Purchase + Bill lines), so cache for 10 min with ?refresh=1 override.
-const DETAIL_TTL_MS = 60 * 60 * 1000;
+const DETAIL_TTL_MS = 30 * 60 * 1000;
 let detailCache: { at: number; data: ExpenseDetailResult } | null = null;
 let detailInFlight: Promise<ExpenseDetailResult> | null = null;
 
@@ -734,7 +734,7 @@ app.get('/api/sales-forecast', async (_req, res, next) => {
 });
 
 // Current Position snapshot - moderate cost (3 QB queries). Cache 5 min.
-const CP_TTL_MS = 60 * 60 * 1000;
+const CP_TTL_MS = 30 * 60 * 1000;
 let cpCache: { at: number; data: CurrentPosition } | null = null;
 let cpInFlight: Promise<CurrentPosition> | null = null;
 
@@ -793,7 +793,7 @@ app.get('/api/tiller/balances', async (req, res, next) => {
 
 // Linked accounts - QB chart of accounts (what to show) × Tiller balances (the $).
 // Served through the durable Supabase cache so a QB hiccup never breaks the page.
-const LINKED_TTL_MS = 60 * 60 * 1000;
+const LINKED_TTL_MS = 30 * 60 * 1000;
 // A result is "good" (worth caching) only when QB actually returned accounts and
 // there's no auth warning. A degraded result never overwrites the last good one.
 const isGoodLinked = (d: LinkedBalances): boolean =>
@@ -841,7 +841,7 @@ app.get('/api/linked-balances', async (req, res, next) => {
 
 // Raw QB Balance Sheet - live pass-through of Reports/BalanceSheet.
 // Cached separately for Accrual vs Cash basis (mirrors P&L pattern).
-const QBBS_TTL_MS = 60 * 60 * 1000;
+const QBBS_TTL_MS = 30 * 60 * 1000;
 type QbBsMethod = 'Accrual' | 'Cash';
 const qbbsCacheByMethod: Record<QbBsMethod, { at: number; data: QbBalanceSheetReport } | null> = { Accrual: null, Cash: null };
 const qbbsInFlightByMethod: Record<QbBsMethod, Promise<QbBalanceSheetReport> | null> = { Accrual: null, Cash: null };
@@ -866,7 +866,7 @@ app.get('/api/qb-balance-sheet', async (req, res, next) => {
 
 // Raw QB P&L Report - live pass-through of Reports/ProfitAndLoss.
 // Cached separately for Accrual vs Cash basis.
-const QBPL_TTL_MS = 60 * 60 * 1000;
+const QBPL_TTL_MS = 30 * 60 * 1000;
 type QbPlMethod = 'Accrual' | 'Cash';
 const qbplCacheByMethod: Record<QbPlMethod, { at: number; data: QbPlReport } | null> = { Accrual: null, Cash: null };
 const qbplInFlightByMethod: Record<QbPlMethod, Promise<QbPlReport> | null> = { Accrual: null, Cash: null };
@@ -891,7 +891,7 @@ app.get('/api/qb-pl-report', async (req, res, next) => {
 
 // Per-account transaction drill-down for the Live P&L tab. Cached per account
 // for 2 minutes (heavy query: Purchases + Bills + BillPayments + JournalEntries).
-const ACCT_TXN_TTL_MS = 60 * 60 * 1000;
+const ACCT_TXN_TTL_MS = 30 * 60 * 1000;
 const acctTxnCache = new Map<string, { at: number; data: AccountTransactionsResult }>();
 const acctTxnInFlight = new Map<string, Promise<AccountTransactionsResult>>();
 
@@ -922,7 +922,7 @@ app.get('/api/account-transactions', async (req, res, next) => {
 // Inventory purchases - Bills/Purchases posting to inventory ASSET accounts.
 // Pulled separately from the P&L flow because inventory accounting in QB
 // posts to Balance Sheet, not P&L.
-const INV_TTL_MS = 60 * 60 * 1000;
+const INV_TTL_MS = 30 * 60 * 1000;
 let invCache: { at: number; data: InventoryPurchasesResult } | null = null;
 let invInFlight: Promise<InventoryPurchasesResult> | null = null;
 
@@ -1092,7 +1092,7 @@ app.get('/api/ar/open', async (req, res, next) => {
 });
 
 // Mapped expenses - sheet-structured categories with QB-live values.
-const MAPPED_TTL_MS = 60 * 60 * 1000;
+const MAPPED_TTL_MS = 30 * 60 * 1000;
 const mappedCache = new Map<string, { at: number; data: MappedExpensesResult }>();
 const mappedInFlight = new Map<string, Promise<MappedExpensesResult>>();
 
@@ -1221,7 +1221,7 @@ app.get('/api/settlement-history', async (req, res, next) => {
 });
 
 // AR Aging - Gelato Pending invoices aged + collection probability + pred week.
-const AGE_TTL_MS = 60 * 60 * 1000;
+const AGE_TTL_MS = 30 * 60 * 1000;
 let ageCache: { at: number; data: ArAgingResult } | null = null;
 let ageInFlight: Promise<ArAgingResult> | null = null;
 
@@ -1242,7 +1242,7 @@ app.get('/api/ar-aging', async (req, res, next) => {
 });
 
 // Monthly OpEx - LT vs PureX split, per month, with PureX remitted.
-const MOPEX_TTL_MS = 60 * 60 * 1000;
+const MOPEX_TTL_MS = 30 * 60 * 1000;
 let mopexCache: { at: number; data: MonthlyOpexResult } | null = null;
 let mopexInFlight: Promise<MonthlyOpexResult> | null = null;
 
@@ -1263,7 +1263,7 @@ app.get('/api/monthly-opex', async (req, res, next) => {
 });
 
 // Inflow Schedule - weekly receivables forecast per source.
-const INFLOW_TTL_MS = 60 * 60 * 1000;
+const INFLOW_TTL_MS = 30 * 60 * 1000;
 let inflowCache: { at: number; data: InflowScheduleResult } | null = null;
 let inflowInFlight: Promise<InflowScheduleResult> | null = null;
 
@@ -1347,7 +1347,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 // value) so the UI stays snappy even while QB is slow.
 // ============================================================================
 const PREFETCH_SHEET_INTERVAL_MS = 30 * 1000; // 30 seconds - sheets (near-live)
-const PREFETCH_QB_INTERVAL_MS = 60 * 60 * 1000; // 60 minutes - QB
+const PREFETCH_QB_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes - QB
 
 async function warm<T>(name: string, fn: () => Promise<T>, set: (data: T, at: number) => void): Promise<void> {
  try {
