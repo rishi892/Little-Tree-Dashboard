@@ -1029,8 +1029,9 @@ app.get('/api/expenses-mapped', async (req, res, next) => {
  const months = Math.min(36, Math.max(1, Number(req.query.months ?? 14)));
  const force = req.query.refresh === '1';
  if (force) invalidateMappedExpensesCache();
- const { data, cached } = await withDurableCache(`expenses-mapped:${entity}:${months}`, MAPPED_TTL_MS, () => getMappedExpenses(entity, months), () => true, force);
- res.json({ cached, ...(entity === 'Combined' ? { derived: 'PureX + Moysh' } : {}), ...data });
+ // getMappedExpenses is durable-cached internally (shared with 13-week + opex).
+ const data = await getMappedExpenses(entity, months, force);
+ res.json({ cached: !force, ...(entity === 'Combined' ? { derived: 'PureX + Moysh' } : {}), ...data });
  } catch (err) { next(err); }
 });
 

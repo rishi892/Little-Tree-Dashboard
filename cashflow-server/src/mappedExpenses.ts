@@ -11,6 +11,7 @@
 import { getExpenseDetail, invalidateExpenseDetailCache, type ExpenseDetailRow } from './expenseDetail.js';
 import { loadOverrides } from './categoryOverrides.js';
 import { getAccountTransactions, invalidateAccountTransactionsCache } from './accountTransactions.js';
+import { withDurableCache, dropDurableMem } from './qbCache.js';
 import { computeMoyshPayroll } from './moyshPayrollByVendor.js';
 import { getPurexPayrollFromSheet } from './purexPayrollSheet.js';
 
@@ -286,38 +287,31 @@ function aggregateRow(
  return { values, purexValues, moyshValues, qbSources, matchedIds };
 }
 
-// In-function cache so direct callers (cashflow13, monthlyOpex) share the same
-// 60-min cached result as the /api/expenses-mapped route. Without this, every
-// short-interval cashflow refresh would re-trigger heavy QB calls.
-const MAPPED_CACHE_TTL_MS = 60 * 60 * 1000;
-const _mappedCache = new Map<string, { at: number; data: MappedExpensesResult }>();
-let _mappedInFlight = new Map<string, Promise<MappedExpensesResult>>();
+const MAPPED_TTL_MS = 30 * 60 * 1000;
 
-export async function getMappedExpenses(entity: SheetEntity, months = 14): Promise<MappedExpensesResult> {
- // Combined is a PURE DERIVED VIEW - no own cache, no own QB calls. Always
- // re-composed from the current PureX + Moysh cache state. To "refresh
- // Combined", refresh PureX and Moysh (which Combined inherits automatically).
- if (entity === 'Combined') return _composeCombined(months);
+export async function getMappedExpenses(entity: SheetEntity, months = 14, force = false): Promise<MappedExpensesResult> {
+ // Combined is a PURE DERIVED VIEW - no own QB calls. It's re-composed from the
+ // (durable-cached) PureX + Moysh results, so it's cheap and consistent.
+ if (entity === 'Combined') return _composeCombined(months, force);
 
- const key = `${entity}|${months}`;
- const cached = _mappedCache.get(key);
- if (cached && Date.now() - cached.at < MAPPED_CACHE_TTL_MS) return cached.data;
- const inFlight = _mappedInFlight.get(key);
- if (inFlight) return inFlight;
- const promise = (async () => {
- try { return await _getMappedExpensesUncached(entity, months); }
- finally { _mappedInFlight.delete(key); }
- })();
- _mappedInFlight.set(key, promise);
- const data = await promise;
- _mappedCache.set(key, { at: Date.now(), data });
+ // PureX / Moysh: durable-cached (Supabase) so the heavy QB pull SURVIVES
+ // serverless cold starts and is shared by EVERY caller (Expenses tab, 13-week,
+ // monthly-opex) - one source of truth, refreshed gently in the background
+ // instead of re-bursting QB on each request.
+ const { data } = await withDurableCache(
+ `mapped-expenses:${entity}:${months}`,
+ MAPPED_TTL_MS,
+ () => _getMappedExpensesUncached(entity, months),
+ (d) => Array.isArray(d.rows) && d.rows.length > 0,
+ force,
+ );
  return data;
 }
 
-async function _composeCombined(months: number): Promise<MappedExpensesResult> {
+async function _composeCombined(months: number, force = false): Promise<MappedExpensesResult> {
  const [px, mo] = await Promise.all([
- getMappedExpenses('PureX', months),
- getMappedExpenses('Moysh', months),
+ getMappedExpenses('PureX', months, force),
+ getMappedExpenses('Moysh', months, force),
  ]);
  const monthCount = px.months.length;
 
@@ -371,7 +365,7 @@ async function _composeCombined(months: number): Promise<MappedExpensesResult> {
 }
 
 export function invalidateMappedExpensesCache(): void {
- _mappedCache.clear();
+ for (const m of [14, 12, 16]) for (const e of ['PureX', 'Moysh']) dropDurableMem(`mapped-expenses:${e}:${m}`);
  invalidateExpenseDetailCache();
  invalidateAccountTransactionsCache();
 }
