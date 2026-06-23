@@ -16,6 +16,7 @@ import { getTillerBalances, type TillerBalances } from './tiller.js';
 import { getPurexClearing, type PurexClearingResult } from './purexClearing.js';
 import { getLinkedBalances, type LinkedBalances } from './linkedAccounts.js';
 import { recordHistory, getChanges } from './assistantHistory.js';
+import { dbInsert } from './db.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1083,10 +1084,21 @@ export function routeQuestion(snap: FinancialSnapshot, question: string, user?: 
 
 export async function askAssistant(question: string, user?: User, sinceISO?: string): Promise<AssistantAnswer & { asOf: string }> {
   const snap = await buildSnapshot();
+  let result: AssistantAnswer;
   if (isWhatChanged(norm(question))) {
     const ans = await getChangesAnswer(sinceISO);
-    return { intent: 'what_changed', title: ans.title, lines: ans.lines, note: ans.note, confidence: 1, suggestions: SUGGESTIONS.filter((s) => !/changed/i.test(s)).slice(0, 4), asOf: snap.asOf };
+    result = { intent: 'what_changed', title: ans.title, lines: ans.lines, note: ans.note, confidence: 1, suggestions: SUGGESTIONS.filter((s) => !/changed/i.test(s)).slice(0, 4) };
+  } else {
+    result = routeQuestion(snap, question, user);
   }
-  const res = routeQuestion(snap, question, user);
-  return { ...res, asOf: snap.asOf };
+  // Log every Q&A to Supabase so the bot has a real conversation history to
+  // learn from / analyse (what people ask, what got answered, confidence).
+  void dbInsert('bot_conversations', {
+    user_name: user?.name ?? '',
+    question: question.slice(0, 500),
+    intent: result.intent,
+    answer_title: result.title.slice(0, 300),
+    confidence: result.confidence,
+  });
+  return { ...result, asOf: snap.asOf };
 }

@@ -40,6 +40,7 @@ import {
 import { loadReviews, addReview, resolveReview, auditReview, UPLOAD_DIR } from './reviews.js';
 import { loadHandoffs, addHandoff, removeHandoff } from './agencyHandoff.js';
 import { askAssistant, buildSnapshot, getChangesAnswer } from './assistant.js';
+import { login } from './auth.js';
 
 const app = express();
 // Allow the configured CLIENT_URL plus any extra origins from .env
@@ -54,6 +55,17 @@ app.use(cors({
  credentials: true,
 }));
 app.use(express.json({ limit: '8mb' })); // 8mb so review screenshots fit in the body
+
+// Login - verifies email + password against the Supabase app_users table
+// (server-side; credentials never reach the browser). Returns the user's
+// identity + role/rep scope, or an error.
+app.post('/api/login', async (req, res, next) => {
+ try {
+ const b = req.body ?? {};
+ const dashboard = b.dashboard === 'cashflow' ? 'cashflow' : 'ar';
+ res.json(await login(String(b.email ?? b.user ?? ''), String(b.password ?? ''), dashboard));
+ } catch (err) { next(err); }
+});
 
 app.get('/api/health', (_req, res) => {
  res.json({ ok: true });

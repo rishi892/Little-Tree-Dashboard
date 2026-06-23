@@ -42,3 +42,7 @@ tunnel*.log
 
 # Bot change-tracking history (regenerated at runtime)
 **/.assistant-history.json
+.vercel
+
+# Claude Code local settings (personal - may contain pasted tokens)
+.claude/settings.local.json

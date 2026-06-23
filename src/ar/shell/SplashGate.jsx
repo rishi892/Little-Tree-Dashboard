@@ -14,37 +14,12 @@ import Embers from './Embers.jsx'
 //   Cashflow Dashboard
 //     full access for any whitelisted user (no scoping inside Cashflow)
 //
-// CEO + CFO can sign into BOTH dashboards. Steve + Chris are Gelato-only.
-// Phil + the sales/staff team (Manny, David, Joe, Ivan, Ken) are Little-Tree-only
-// (no Gelato, no Cashflow).
+// Credentials now live in Supabase (app_users) and are verified server-side via
+// POST /api/login - so passwords are no longer shipped in this bundle. The role
+// scope (full / gelato-only / little-tree-only) + rep come back from the API.
 const CONFIGS = {
-  ar: {
-    title: 'AR Dashboard · Sign in',
-    users: [
-      { user: 'ceo@littletreeconfections.com', pass: 'Joey@2026', role: 'full', name: 'Joey', title: 'CEO' },
-      { user: 'cfo@littletreeconfections.com', pass: 'Rishi@2026', role: 'full', name: 'Rishi', title: 'CFO', photo: '/Rishi.png' },
-      { user: 'STVSWAY@aol.com', pass: 'Steve@2026', role: 'gelato-only', name: 'Steve' },
-      { user: 'chindo@gopurex.com', pass: 'Chris@2026', role: 'gelato-only', name: 'Chris' },
-      { user: 'celia@flavrhouse.com', pass: 'Celia@2026', role: 'gelato-only', name: 'Celia' },
-      { user: 'summersky@gelatocanna.com', pass: 'Summer@2026', role: 'gelato-only', name: 'Summer' },
-      { user: 'phil.m@littletreeconfections.com', pass: 'Phill@2026', role: 'little-tree-only', name: 'Phil', title: 'CMO', photo: '/Phill.jpg' },
-      // Sales / staff - Little Tree only. `rep` scopes them to ONLY their own
-      // customers' data (matches the canonical Sales Rep name on the tracker).
-      // Phil + Ivan have no `rep` → they see all of Little Tree.
-      { user: 'Manny.f@littletreeconfections.com', pass: 'Manny@2026', role: 'little-tree-only', rep: 'Manny', name: 'Manny', photo: '/manny.png' },
-      { user: 'David.d@littletreeconfections.com', pass: 'David@2026', role: 'little-tree-only', rep: 'Dave', name: 'David' },
-      { user: 'Joe@littletreeconfections.com', pass: 'Joe@2026', role: 'little-tree-only', rep: 'Joe Pekin', name: 'Joe' },
-      { user: 'chetvertinovskiy.i@gmail.com', pass: 'Ivan@2026', role: 'little-tree-only', name: 'Ivan' },
-      { user: 'ken@littletreeconfections.com', pass: 'Ken@2026', role: 'little-tree-only', rep: 'Ken', name: 'Ken' },
-    ],
-  },
-  cashflow: {
-    title: 'Cashflow Dashboard · Sign in',
-    users: [
-      { user: 'cfo@littletreeconfections.com', pass: 'Rishi@2026', role: 'full', name: 'Rishi', title: 'CFO' },
-      { user: 'ceo@littletreeconfections.com', pass: 'Joey@2026', role: 'full', name: 'Joey', title: 'CEO' },
-    ],
-  },
+  ar:       { title: 'AR Dashboard · Sign in' },
+  cashflow: { title: 'Cashflow Dashboard · Sign in' },
 }
 
 export default function SplashGate({ target = 'ar', onEnter, onBack }) {
@@ -56,70 +31,59 @@ export default function SplashGate({ target = 'ar', onEnter, onBack }) {
   const [exiting, setExiting] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
 
-    const u = username.trim().toLowerCase()
+    const u = username.trim()
     if (!u || !password) {
       setError('Please enter both username and password.')
       return
     }
 
     setSubmitting(true)
-
-    setTimeout(() => {
-      const matched = cfg.users.find((usr) => u === usr.user.toLowerCase() && password === usr.pass)
-      if (matched) {
-        if (target === 'cashflow') {
-          // Persist the flag the Cashflow app expects. Redirect immediately -
-          // running an exit animation on a page we're about to navigate away
-          // from just adds visible "black" time during the page swap.
-          // sessionStorage (not localStorage) - flag dies on tab close so
-          // the CFO password is re-asked on every fresh browser visit.
-          // Also stash the signed-in email so that if the user later switches
-          // into the AR dashboard, the Review widget can attribute their feedback.
-          try {
-            sessionStorage.setItem('lt-cfo-auth', '1')
-            sessionStorage.setItem('lt_user', matched.user)
-            sessionStorage.setItem('lt_name', matched.name || '')
-            sessionStorage.setItem('lt_title', matched.title || '')
-            sessionStorage.setItem('lt_photo', matched.photo || '')
-          } catch { /* ignore */ }
-          window.location.href = '/cashflow.html?direct=1'
-        } else {
-          // Persist role + signed-in email so Dashboard/Sidebar can scope views
-          // and the Review widget can attribute feedback to the right user.
-          try {
-            sessionStorage.setItem('lt_role', matched.role || 'full')
-            sessionStorage.setItem('lt_user', matched.user)
-            // Display identity shown next to Sign out.
-            sessionStorage.setItem('lt_name', matched.name || '')
-            sessionStorage.setItem('lt_title', matched.title || '')
-            sessionStorage.setItem('lt_photo', matched.photo || '')
-            // Rep scoping: sales staff see only their own customers. Always set
-            // (empty for non-scoped users) so a prior session never leaks.
-            sessionStorage.setItem('lt_rep', matched.rep || '')
-          } catch { /* ignore */ }
-          setExiting(true)
-          setTimeout(onEnter, 300)
-        }
-      } else if (target === 'cashflow') {
-        // Check if this email belongs to a scoped AR-only user trying the
-        // wrong door - give them a specific message instead of a generic
-        // "invalid credentials" that would leave them stuck guessing.
-        const arUser = CONFIGS.ar.users.find((usr) => u === usr.user.toLowerCase())
-        if (arUser && arUser.role !== 'full') {
-          setError('This account is for the AR Dashboard only. Click Back and choose AR Dashboard to sign in.')
-        } else {
-          setError('Invalid credentials. Please try again.')
-        }
+    try {
+      const resp = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: u, password, dashboard: target }),
+      })
+      const data = await resp.json().catch(() => ({}))
+      if (!data.ok || !data.user) {
+        setError(data.error || 'Invalid credentials. Please try again.')
         setSubmitting(false)
-      } else {
-        setError('Invalid credentials. Please try again.')
-        setSubmitting(false)
+        return
       }
-    }, 120)
+      const m = data.user
+      if (target === 'cashflow') {
+        // Flag the Cashflow app expects; sessionStorage so it re-asks on a fresh
+        // visit. Redirect immediately (no exit animation before a page swap).
+        try {
+          sessionStorage.setItem('lt-cfo-auth', '1')
+          sessionStorage.setItem('lt_user', m.email || u)
+          sessionStorage.setItem('lt_name', m.name || '')
+          sessionStorage.setItem('lt_title', m.title || '')
+          sessionStorage.setItem('lt_photo', m.photo || '')
+        } catch { /* ignore */ }
+        window.location.href = '/cashflow.html?direct=1'
+      } else {
+        // Persist role + rep so the Dashboard/Sidebar can scope views and the
+        // Review widget can attribute feedback. Always set (empty for non-scoped).
+        try {
+          sessionStorage.setItem('lt_role', m.role || 'full')
+          sessionStorage.setItem('lt_user', m.email || u)
+          sessionStorage.setItem('lt_name', m.name || '')
+          sessionStorage.setItem('lt_title', m.title || '')
+          sessionStorage.setItem('lt_photo', m.photo || '')
+          sessionStorage.setItem('lt_rep', m.rep || '')
+        } catch { /* ignore */ }
+        setExiting(true)
+        setTimeout(onEnter, 300)
+      }
+    } catch {
+      setError('Could not reach the server. Please try again.')
+      setSubmitting(false)
+    }
   }
 
   return (
