@@ -323,9 +323,9 @@ let detailInFlight: Promise<ExpenseDetailResult> | null = null;
 app.get('/api/expense-detail', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- // getExpenseDetail() ignores its lookback param (always builds from Jan 2025).
- const { data, cached } = await withDurableCache('expense-detail', DETAIL_TTL_MS, getExpenseDetail, () => true, force);
- res.json({ cached, ...data });
+ // getExpenseDetail is durable-cached internally (shared with mapped-expenses).
+ const data = await getExpenseDetail(14, force);
+ res.json({ cached: !force, ...data });
  } catch (err) {
  next(err);
  }

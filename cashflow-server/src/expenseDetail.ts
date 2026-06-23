@@ -12,6 +12,7 @@
 
 import { QBO_API_BASE } from './config.js';
 import { qboFetch } from './qbHttp.js';
+import { withDurableCache, dropDurableMem } from './qbCache.js';
 import { getValidAccessToken } from './oauth.js';
 import { loadOverrides } from './categoryOverrides.js';
 
@@ -219,26 +220,16 @@ const RELEVANT_ACCOUNT_TYPES = new Set([
  */
 const FIXED_START = { year: 2025, month: 0 }; // Jan 2025 (month is 0-indexed)
 
-// Module cache so PureX / Moysh / Combined entity fetches all share the SAME
-// underlying QB snapshot. Without this, each entity makes its own fresh
-// getExpenseDetail() call and QB throttling/timing makes the data drift -
-// breaking Combined === PureX + Moysh.
-let _expCache: { at: number; data: ExpenseDetailResult } | null = null;
-let _expInFlight: Promise<ExpenseDetailResult> | null = null;
-const _EXP_CACHE_TTL_MS = 60 * 60 * 1000;
+// Durable-cached (Supabase) so PureX / Moysh / Combined / 13-week / monthly-opex
+// all share the SAME QB snapshot across cold starts - and the heavy 12-month P&L
+// pull happens once per 30 min in the background, not on every request.
+const _EXP_CACHE_TTL_MS = 30 * 60 * 1000;
 
-export function invalidateExpenseDetailCache(): void { _expCache = null; }
+export function invalidateExpenseDetailCache(): void { dropDurableMem('expense-detail'); }
 
-export async function getExpenseDetail(_lookbackMonths = 14): Promise<ExpenseDetailResult> {
- if (_expCache && Date.now() - _expCache.at < _EXP_CACHE_TTL_MS) return _expCache.data;
- if (_expInFlight) return _expInFlight;
- _expInFlight = (async () => {
- try { return await _getExpenseDetailUncached(); }
- finally { _expInFlight = null; }
- })();
- const data = await _expInFlight;
- // Don't poison the cache with an empty result (e.g. QB 429 wiped everything).
- if (data.rows.length > 0) _expCache = { at: Date.now(), data };
+export async function getExpenseDetail(_lookbackMonths = 14, force = false): Promise<ExpenseDetailResult> {
+ // isGood: never cache an empty result (a QB 429 can wipe everything).
+ const { data } = await withDurableCache('expense-detail', _EXP_CACHE_TTL_MS, _getExpenseDetailUncached, (d) => d.rows.length > 0, force);
  return data;
 }
 
