@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import OAuthClient from 'intuit-oauth';
 import { loadQbConfig } from './qbConfig.js';
-import { loadTokens, loadTokensFresh, saveTokens, acquireRefreshLock, type StoredTokens } from './tokenStore.js';
+import { loadTokens, loadTokensFresh, saveTokens, acquireRefreshLock, releaseRefreshLock, type StoredTokens } from './tokenStore.js';
 
 // The OAuth client is built from the qb_config table (client id/secret/redirect/
 // environment). Rebuild only when those values actually change, so an admin edit
@@ -96,11 +96,20 @@ export async function getValidAccessToken(): Promise<StoredTokens> {
  // whole connection).
  const won = await acquireRefreshLock(tokens.realmId);
  if (!won) {
- // Another worker holds the lock. Use the still-valid token immediately; only
- // if it's genuinely on the edge of expiry do we briefly wait for the fresh one.
+ // Another worker holds the lock. If our token is still usable, use it now and
+ // never block. If it's actually EXPIRED, we must NOT return it (that 401s the
+ // QB call) - wait for the holder to publish the fresh token.
  if (stillUsable) return tokens;
- const fresh = await waitForFreshToken(tokens.expiresAt, 6_000);
- return fresh ?? tokens;
+ let fresh = await waitForFreshToken(tokens.expiresAt, 22_000);
+ if (fresh) return fresh;
+ // Holder seems stuck. Take over ONLY if the lock is genuinely free/stale -
+ // never refresh while someone else still holds it (that trips reuse-detection).
+ if (await acquireRefreshLock(tokens.realmId)) {
+ refreshInFlight = performIntuitRefresh(tokens).finally(() => { refreshInFlight = null; });
+ return refreshInFlight;
+ }
+ fresh = await waitForFreshToken(tokens.expiresAt, 6_000);
+ return fresh ?? tokens; // last resort
  }
 
  // We won the lock → perform the single refresh and persist it.
@@ -115,7 +124,7 @@ export async function getValidAccessToken(): Promise<StoredTokens> {
 async function waitForFreshToken(staleExpiry: number, maxMs = 6_000): Promise<StoredTokens | null> {
  const deadline = Date.now() + maxMs;
  while (Date.now() < deadline) {
- await sleep(350);
+ await sleep(500);
  const t = await loadTokensFresh();
  if (t && t.expiresAt > staleExpiry) return t;
  }
@@ -154,6 +163,9 @@ async function performIntuitRefresh(current: StoredTokens): Promise<StoredTokens
  return fresh;
  }
  }
+ // Refresh failed and there's no fresher token. Release the lock so another
+ // worker can retry instead of waiting out the full lock TTL.
+ await releaseRefreshLock(current.realmId).catch(() => {});
  throw e;
  }
 }

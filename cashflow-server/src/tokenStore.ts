@@ -2,10 +2,12 @@ import { dbSelectOne, dbUpsert, dbDelete, dbUpdateReturning } from './db.js';
 
 type TokenRow = { realm_id: string; access_token: string; refresh_token: string; expires_at: number };
 
-/** How long a refresh lock is considered held before it's treated as stale
- * (the holder probably crashed mid-refresh). Kept short - a normal refresh
- * finishes in 2-5s. */
-const REFRESH_LOCK_TTL_MS = 12_000;
+/** How long a refresh lock is considered held before it's treated as stale (the
+ * holder probably crashed). MUST be longer than the slowest real refresh
+ * (Intuit + a serverless cold start can take 10-15s) so a slow-but-alive holder
+ * is never treated as dead - otherwise a second worker refreshes too and trips
+ * Intuit's token-reuse detection, revoking the whole connection. */
+const REFRESH_LOCK_TTL_MS = 25_000;
 
 export type StoredTokens = {
  accessToken: string;
@@ -102,6 +104,13 @@ export async function acquireRefreshLock(realmId: string): Promise<boolean> {
  const q = `realm_id=eq.${encodeURIComponent(realmId)}&or=(refresh_lock_at.is.null,refresh_lock_at.lt.${staleCutoff})`;
  const updated = await dbUpdateReturning('qb_tokens', q, { refresh_lock_at: nowIso });
  return updated.length > 0;
+}
+
+/** Release the refresh lock (e.g. after a FAILED refresh, so another worker can
+ * retry immediately instead of waiting out the lock TTL). A successful refresh
+ * releases it via saveTokens. */
+export async function releaseRefreshLock(realmId: string): Promise<void> {
+ await dbUpdateReturning('qb_tokens', `realm_id=eq.${encodeURIComponent(realmId)}`, { refresh_lock_at: null });
 }
 
 export async function clearTokens(): Promise<void> {
