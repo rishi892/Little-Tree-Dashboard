@@ -51,11 +51,49 @@ export function CfoCopilot() {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [msgs, setMsgs] = useState<Msg[]>([greeting]);
+  const [waving, setWaving] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [msgs, busy, open]);
   useEffect(() => { if (open) setTimeout(() => inputRef.current?.focus(), 80); }, [open]);
+
+  // Inject the wave keyframes once.
+  useEffect(() => {
+    const id = 'cfo-wave-style';
+    if (document.getElementById(id)) return;
+    const s = document.createElement('style');
+    s.id = id;
+    s.textContent = `
+      @keyframes cfoWave {
+        0% { transform: rotate(0deg); }
+        15% { transform: rotate(15deg); }
+        30% { transform: rotate(-9deg); }
+        45% { transform: rotate(15deg); }
+        60% { transform: rotate(-9deg); }
+        75% { transform: rotate(11deg); }
+        100% { transform: rotate(0deg); }
+      }
+      @keyframes cfoBubblePop {
+        0% { opacity: 0; transform: translateY(8px) scale(0.6); }
+        18% { opacity: 1; transform: translateY(0) scale(1); }
+        82% { opacity: 1; transform: translateY(0) scale(1); }
+        100% { opacity: 0; transform: translateY(-5px) scale(0.9); }
+      }`;
+    document.head.appendChild(s);
+  }, []);
+
+  // The robot waves to greet: on arrival, then every ~8s while idle (closed).
+  useEffect(() => {
+    if (open) { setWaving(false); return; }
+    setWaving(true);
+    const stop = setTimeout(() => setWaving(false), 1300);
+    const iv = setInterval(() => {
+      setWaving(true);
+      setTimeout(() => setWaving(false), 1300);
+    }, 8000);
+    return () => { clearTimeout(stop); clearInterval(iv); };
+  }, [open]);
 
   // The bot checks for itself what changed since you last looked, then greets
   // you with it the first time you open the panel - you never tell it anything
@@ -99,9 +137,25 @@ export function CfoCopilot() {
 
   return (
     <>
+      {/* Greeting bubble - pops up while the robot waves */}
+      {!open && waving && (
+        <div
+          style={{
+            position: 'fixed', right: 22, bottom: 104, zIndex: 9998,
+            background: '#fff', color: '#065f46', fontWeight: 700, fontSize: 14,
+            padding: '8px 14px', borderRadius: 16, borderBottomRightRadius: 4,
+            boxShadow: '0 8px 22px rgba(0,0,0,0.18)', border: '1px solid #d1fae5',
+            animation: 'cfoBubblePop 1.3s ease-in-out', pointerEvents: 'none', whiteSpace: 'nowrap',
+          }}
+        >
+          👋 {firstName ? `Hi ${firstName}!` : 'Hi there!'}
+        </div>
+      )}
+
       {/* Launcher */}
       <button
         onClick={() => setOpen((o) => !o)}
+        onMouseEnter={() => { if (!open) setWaving(true); }}
         aria-label="CFO Copilot"
         style={{
           position: 'fixed', right: 24, bottom: 24, zIndex: 9998,
@@ -116,7 +170,20 @@ export function CfoCopilot() {
         onMouseUp={(e) => (e.currentTarget.style.transform = 'scale(1)')}
         onMouseLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
       >
-        {open ? <span style={{ fontSize: 24 }}>✕</span> : <img src="/Bot.png" alt="" style={{ width: 72, height: 72, objectFit: 'contain', filter: 'drop-shadow(0 6px 14px rgba(0,0,0,0.32))' }} />}
+        {open ? (
+          <span style={{ fontSize: 24 }}>✕</span>
+        ) : (
+          <img
+            src="/Bot.png"
+            alt=""
+            style={{
+              width: 72, height: 72, objectFit: 'contain',
+              filter: 'drop-shadow(0 6px 14px rgba(0,0,0,0.32))',
+              transformOrigin: 'bottom center',
+              animation: waving ? 'cfoWave 1.25s ease-in-out' : 'none',
+            }}
+          />
+        )}
       </button>
 
       {open && (
