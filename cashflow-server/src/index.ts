@@ -15,6 +15,7 @@ import { getCashflow13Week, type CashflowResult } from './cashflow13.js';
 import { getCurrentPosition, type CurrentPosition } from './currentPosition.js';
 import { getTillerBalances, type TillerBalances } from './tiller.js';
 import { getLinkedBalances, type LinkedBalances } from './linkedAccounts.js';
+import { withDurableCache } from './qbCache.js';
 import { getArOpen, type ArResult } from './ar.js';
 import { getGelatoAr, type GelatoArResult } from './gelatoAr.js';
 import { getCollectionCurve, type CollectionCurveResult } from './collectionCurve.js';
@@ -791,10 +792,15 @@ app.get('/api/tiller/balances', async (req, res, next) => {
 });
 
 // Linked accounts - QB chart of accounts (what to show) × Tiller balances (the $).
-// Cache 5 min; background prefetcher keeps it warm.
+// Served through the durable Supabase cache so a QB hiccup never breaks the page.
 const LINKED_TTL_MS = 60 * 60 * 1000;
-let linkedCache: { at: number; data: LinkedBalances } | null = null;
-let linkedInFlight: Promise<LinkedBalances> | null = null;
+// A result is "good" (worth caching) only when QB actually returned accounts and
+// there's no auth warning. A degraded result never overwrites the last good one.
+const isGoodLinked = (d: LinkedBalances): boolean =>
+  !d.warnings.some((w) => /not connected/i.test(w)) &&
+  d.qb.cashAccounts.length + d.qb.creditCards.length > 0;
+const getLinkedBalancesCached = (force = false) =>
+  withDurableCache('linked-balances', LINKED_TTL_MS, getLinkedBalances, isGoodLinked, force);
 
 app.get('/api/tiller-transactions', async (req, res, next) => {
  try {
@@ -828,22 +834,8 @@ app.get('/api/sales-by-product', async (req, res, next) => {
 app.get('/api/linked-balances', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- if (!force && linkedCache && Date.now() - linkedCache.at < LINKED_TTL_MS) {
- res.json({ cached: true, ...linkedCache.data });
- return;
- }
- if (!linkedInFlight) {
- linkedInFlight = getLinkedBalances()
- .then((data) => {
- linkedCache = { at: Date.now(), data };
- return data;
- })
- .finally(() => {
- linkedInFlight = null;
- });
- }
- const data = await linkedInFlight;
- res.json({ cached: false, ...data });
+ const { data, cached } = await getLinkedBalancesCached(force);
+ res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
@@ -1391,7 +1383,7 @@ async function prewarmQbCaches(): Promise<void> {
  const t0 = Date.now();
  // QB calls - run sequentially (not parallel) to spread out throttle pressure.
  // Each call may take 5-15s; total cycle takes ~1-2 min once an hour.
- await warm('linked', () => getLinkedBalances(), (data, at) => { linkedCache = { at, data }; });
+ await warm('linked', () => getLinkedBalancesCached(true), () => {/* durable cache populated inside */});
  await warm('ar-aging', () => getArAging(), (data, at) => { ageCache = { at, data }; });
  await warm('inflow', () => getInflowSchedule(), (data, at) => { inflowCache = { at, data }; });
  await warm('inventory-purchases', () => getInventoryPurchases(), (data, at) => { invCache = { at, data }; });
