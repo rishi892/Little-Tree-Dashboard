@@ -223,7 +223,7 @@ const FIXED_START = { year: 2025, month: 0 }; // Jan 2025 (month is 0-indexed)
 // Durable-cached (Supabase) so PureX / Moysh / Combined / 13-week / monthly-opex
 // all share the SAME QB snapshot across cold starts - and the heavy 12-month P&L
 // pull happens once per 30 min in the background, not on every request.
-const _EXP_CACHE_TTL_MS = 30 * 60 * 1000;
+const _EXP_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour - pull expenses once, refresh hourly
 
 export function invalidateExpenseDetailCache(): void { dropDurableMem('expense-detail'); }
 

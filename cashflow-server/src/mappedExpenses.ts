@@ -287,7 +287,7 @@ function aggregateRow(
  return { values, purexValues, moyshValues, qbSources, matchedIds };
 }
 
-const MAPPED_TTL_MS = 30 * 60 * 1000;
+const MAPPED_TTL_MS = 60 * 60 * 1000; // 1 hour - shared expense source, refresh hourly
 
 export async function getMappedExpenses(entity: SheetEntity, months = 14, force = false): Promise<MappedExpensesResult> {
  // Combined is a PURE DERIVED VIEW - no own QB calls. It's re-composed from the
