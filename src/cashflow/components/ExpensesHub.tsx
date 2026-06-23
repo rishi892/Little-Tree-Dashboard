@@ -2,28 +2,22 @@ import { useEffect, useState } from 'react';
 import { onCfoNav } from '../cfoNav';
 import { MappedExpensesPage } from './MappedExpensesPage';
 import { MonthlySummary } from './MonthlySummary';
-import { SubscriptionAudit } from './SubscriptionAudit';
-import { SubscriptionProjection } from './SubscriptionProjection';
 
-export type ExpensesTab = 'monthly' | 'combined' | 'purex' | 'moysh' | 'subscriptions';
+export type ExpensesTab = 'monthly' | 'combined' | 'purex' | 'moysh';
 
 const TABS: Array<{ key: ExpensesTab; label: string }> = [
  { key: 'monthly', label: 'Monthly LT vs PureX' },
  { key: 'combined', label: 'Combined' },
  { key: 'purex', label: 'PureX' },
  { key: 'moysh', label: 'Moysh' },
- { key: 'subscriptions', label: 'Subscriptions' },
 ];
-
-type SubsSubTab = 'projection' | 'audit';
 
 export function ExpensesHub() {
  const [tab, setTab] = useState<ExpensesTab>('monthly');
- const [subsTab, setSubsTab] = useState<SubsSubTab>('projection');
 
  // CFO Copilot "show me" - switch to the expenses sub-tab it points at.
  useEffect(() => onCfoNav((d) => {
- if (['monthly', 'combined', 'purex', 'moysh', 'subscriptions'].includes(d.tab)) setTab(d.tab as ExpensesTab);
+ if (['monthly', 'combined', 'purex', 'moysh'].includes(d.tab)) setTab(d.tab as ExpensesTab);
  }), []);
 
  return (
@@ -66,28 +60,6 @@ export function ExpensesHub() {
  subtitle="Sheet category layout · only Moysh-paid amounts"
  totalLabel="MOYSH (OTHER) TOTAL"
  />
- </div>
- <div style={{ display: tab === 'subscriptions' ? 'block' : 'none' }}>
- <div className="segmented" style={{ marginBottom: 20 }}>
- <button className={subsTab === 'projection' ? 'active' : ''} onClick={() => setSubsTab('projection')}>
- 13-Week Projection
- </button>
- <button className={subsTab === 'audit' ? 'active' : ''} onClick={() => setSubsTab('audit')}>
- QB Audit (Jan 2025+)
- </button>
- </div>
- <div style={{ display: subsTab === 'projection' ? 'block' : 'none' }}><SubscriptionProjection /></div>
- <div style={{ display: subsTab === 'audit' ? 'block' : 'none' }}>
- <div className="page-head">
- <div>
- <h1 className="page-title">Subscriptions Audit</h1>
- <div className="page-sub">
- Expected recurring vendors cross-checked against QBO vendors, purchases, and bills - last 16 months (Jan 2025 onwards).
- </div>
- </div>
- </div>
- <SubscriptionAudit />
- </div>
  </div>
  </>
  );
