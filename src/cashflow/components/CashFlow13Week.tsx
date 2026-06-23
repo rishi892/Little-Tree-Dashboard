@@ -428,16 +428,16 @@ export function CashFlow13Week() {
  {/* Past / Actual / Variance: one layout, three modes, all from the
    * past-weeks grid (snapshot = budget frozen that Monday, actuals = real). */}
  {view === 'past' && (
- <PastWeeksTable mode="budget" pastGrid={pastGrid} />
+ <PastWeeksTable mode="budget" budgetData={data} pastGrid={pastGrid} />
  )}
  {view === 'actual' && (
  <CurrentMonthOverviewSection data={monthOverview} />
  )}
  {view === 'actual' && (
- <PastWeeksTable mode="actual" pastGrid={pastGrid} />
+ <PastWeeksTable mode="actual" budgetData={data} pastGrid={pastGrid} />
  )}
  {view === 'variance' && (
- <PastWeeksTable mode="variance" pastGrid={pastGrid} />
+ <PastWeeksTable mode="variance" budgetData={data} pastGrid={pastGrid} />
  )}
 
  {/* CC Utilisation editor removed - CC financing is no longer part of the 13-week plan. */}
@@ -1346,12 +1346,13 @@ function actualForInflowLine(label: string, a: WeekActuals): number | null {
  if (/little tree|non-gelato/i.test(label)) return a.arActuals?.nonGelato?.amount ?? 0;
  if (/projected|new sales/i.test(label)) return a.salesInvoiced?.total ?? 0;
  return null;
-}
-// ---- Past weeks shared table (Past / Actual / Variance) -------------------
-// One layout, three modes, all driven by the past-weeks grid. Each item has a
-// snapshot (the budget frozen that Monday = the plan for that elapsed week) and
-// actuals (what really happened):
-//   budget   -> the planned numbers per elapsed week (Past tab)
+}// ---- Past weeks shared table (Past / Actual / Variance) -------------------
+// One layout, three modes. Budget for an elapsed week blends the best source:
+// INFLOWS from the snapshot frozen that Monday (the AR/sales plan committed to -
+// the live recompute is forward-looking so it reads ~0 on past weeks), OUTFLOWS
+// from the current run-rate model (valid for past weeks, avoids gaps in older
+// snapshots). Actuals come from the grid.
+//   budget   -> the plan per elapsed week (Past tab)
 //   actual   -> what was collected / invoiced (QB); un-booked = "entry yet to be done"
 //   variance -> budget over actual over Δ
 const PW_ALIASES: Record<string, string> = { 'Non-Gelato AR Collections (lag-curve)': 'Little Tree AR Collections (lag-curve)' };
@@ -1359,7 +1360,7 @@ const pwCanon = (l: string) => PW_ALIASES[l] ?? l;
 const PW_STD_INFLOW = ['Gelato AR Collections (Net 97)', 'Little Tree AR Collections (lag-curve)', 'Projected AR from new sales (3-bucket)'];
 const PW_TITLES = { budget: 'Past · budgeted (elapsed weeks)', actual: 'Actual · what really happened', variance: 'Variance · budget vs actual' };
 
-function PastWeeksTable({ mode, pastGrid }: { mode: 'budget' | 'actual' | 'variance'; pastGrid: PastWeeksGridResponse | null }) {
+function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actual' | 'variance'; budgetData: Cashflow13; pastGrid: PastWeeksGridResponse | null }) {
  if (!pastGrid) return <LoadingSection title={PW_TITLES[mode]} />;
  const items = pastGrid.items;
  if (items.length === 0) return <EmptySection title={PW_TITLES[mode]} sub="No past weeks data yet." />;
@@ -1367,16 +1368,10 @@ function PastWeeksTable({ mode, pastGrid }: { mode: 'budget' | 'actual' | 'varia
  const muted = (t: string) => <span style={{ color: 'var(--muted)' }}>{t}</span>;
  const TBD = <span style={{ color: 'var(--muted)', fontStyle: 'italic', fontSize: 11 }}>entry yet to be done</span>;
 
- // Stable row set = standard inflow lines + any line label seen on a snapshot.
- const inflowLabels: string[] = [...PW_STD_INFLOW];
- const seenIn = new Set(PW_STD_INFLOW);
- const outflowLabels: string[] = [];
- const seenOut = new Set<string>();
- for (const it of items) {
-  if (!it.snapshot) continue;
-  for (const l of it.snapshot.inflows) { const c = pwCanon(l.label); if (!seenIn.has(c)) { seenIn.add(c); inflowLabels.push(c); } }
-  for (const l of it.snapshot.outflows) { const c = pwCanon(l.label); if (!seenOut.has(c)) { seenOut.add(c); outflowLabels.push(c); } }
- }
+ // Outflow rows + budget come from the current run-rate model (valid for past
+ // weeks). Align each elapsed week to its column in budgetData by Monday.
+ const wkByMonday = new Map(budgetData.weeks.map((w, i) => [w.start, i]));
+ const outflowLabels = budgetData.outflows.map((l) => l.label);
 
  const budgetInflow = (it: PastWeeksGridItem, label: string): number | null => {
   if (!it.snapshot) return null;
@@ -1384,14 +1379,18 @@ function PastWeeksTable({ mode, pastGrid }: { mode: 'budget' | 'actual' | 'varia
   return h ? h.wk1Value : 0;
  };
  const budgetOutflow = (it: PastWeeksGridItem, label: string): number | null => {
-  if (!it.snapshot) return null;
-  const h = it.snapshot.outflows.find((x) => pwCanon(x.label) === label);
-  return h ? h.wk1Value : 0;
+  const wi = wkByMonday.get(it.monday);
+  if (wi == null) return null;
+  const line = budgetData.outflows.find((l) => l.label === label);
+  return line ? (line.values[wi] ?? 0) : 0;
+ };
+ const budgetOutTotal = (it: PastWeeksGridItem): number | null => {
+  const wi = wkByMonday.get(it.monday);
+  return wi == null ? null : (budgetData.totals.outflows[wi] ?? 0);
  };
  const actInflow = (it: PastWeeksGridItem, label: string): number | null =>
   it.actuals ? actualForInflowLine(label, it.actuals) : null;
 
- // One cell, rendered per active mode.
  const cell = (budget: number | null, actual: number | null, lowerIsBetter = false): React.ReactNode => {
   if (mode === 'budget') return (budget === null || budget === 0) ? muted('-') : fmt(budget);
   if (mode === 'actual') return actual === null ? TBD : fmt(actual);
@@ -1413,8 +1412,8 @@ function PastWeeksTable({ mode, pastGrid }: { mode: 'budget' | 'actual' | 'varia
  };
 
  const subMap = {
-  budget: <>The budgeted plan for each elapsed week - frozen the Monday it was that week's Wk 1, same line layout as the Budgeted tab. Newest week on the left.</>,
-  actual: <>What really happened each elapsed week - sales invoiced + AR collected (pulled from QB / collections). Per-category outflows aren't booked individually and un-booked weeks show <em>entry yet to be done</em>; the bank total appears on TOTAL OUTFLOWS.</>,
+  budget: <>The plan for each elapsed week - inflows from the snapshot frozen that Monday, outflows from the current run-rate model. Same line layout as Budgeted; newest week on the left.</>,
+  actual: <>What really happened each elapsed week - sales invoiced + AR collected (from QB / collections). Per-category outflows aren't booked individually and un-booked weeks show <em>entry yet to be done</em>; the bank total appears on TOTAL OUTFLOWS.</>,
   variance: <>Per elapsed week: <strong>budget</strong> over <strong>actual</strong> over the <strong>Δ</strong>. Green = better than plan (more cash in, less out, higher net). Un-booked actuals show <em>entry yet to be done</em>.</>,
  };
 
@@ -1437,7 +1436,7 @@ function PastWeeksTable({ mode, pastGrid }: { mode: 'budget' | 'actual' | 'varia
        {items.map((it) => <td key={it.monday} className="num">{it.snapshot ? fmt(it.snapshot.openingCash) : muted('-')}</td>)}
       </tr>
       <tr><td colSpan={1 + items.length} style={{ background: 'var(--accent-soft)', fontWeight: 700, color: '#059669' }}>CASH INFLOWS</td></tr>
-      {inflowLabels.map((label) => (
+      {PW_STD_INFLOW.map((label) => (
        <tr key={`in-${label}`}>
         <td>{label}</td>
         {items.map((it) => <td key={it.monday} className="num">{cell(budgetInflow(it, label), actInflow(it, label))}</td>)}
@@ -1460,11 +1459,15 @@ function PastWeeksTable({ mode, pastGrid }: { mode: 'budget' | 'actual' | 'varia
       ))}
       <tr className="total-row">
        <td>TOTAL OUTFLOWS {mode !== 'budget' && <span className="vendor-note">actual = bank debits</span>}</td>
-       {items.map((it) => <td key={it.monday} className="num">{cell(it.snapshot ? it.snapshot.totalOutflowWk1 : null, it.actuals ? it.actuals.outflow : null, true)}</td>)}
+       {items.map((it) => <td key={it.monday} className="num">{cell(budgetOutTotal(it), it.actuals ? it.actuals.outflow : null, true)}</td>)}
       </tr>
       <tr className="total-row">
        <td><strong>NET CHANGE</strong></td>
-       {items.map((it) => <td key={it.monday} className="num">{cell(it.snapshot ? it.snapshot.netChangeWk1 : null, it.actuals ? it.actuals.netChange : null)}</td>)}
+       {items.map((it) => {
+        const bo = budgetOutTotal(it);
+        const budNet = (it.snapshot && bo != null) ? it.snapshot.totalInflowWk1 - bo : null;
+        return <td key={it.monday} className="num">{cell(budNet, it.actuals ? it.actuals.netChange : null)}</td>;
+       })}
       </tr>
      </tbody>
     </table>
