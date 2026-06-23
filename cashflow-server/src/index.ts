@@ -144,8 +144,10 @@ app.post('/api/cache/invalidate-all', async (_req, res, next) => {
  try {
   // In-memory caches local to this file
   invalidateExpenseCaches();
-  dropDurableMem('current-position');
-  dropDurableMem('linked-balances');
+  for (const k of ['current-position', 'linked-balances', 'dashboard', 'ar-aging',
+    'inflow-schedule', 'monthly-opex', 'expense-detail',
+    'qb-pl-report:Accrual', 'qb-pl-report:Cash',
+    'qb-balance-sheet:Accrual', 'qb-balance-sheet:Cash']) dropDurableMem(k);
   // Dynamically import + invalidate every module-level cache.
   const mods = await Promise.all([
    import('./audit.js'),
@@ -271,9 +273,10 @@ app.get('/auth/callback', async (req: Request, res: Response, next: NextFunction
  }
 });
 
-app.get('/api/dashboard', async (_req, res, next) => {
+app.get('/api/dashboard', async (req, res, next) => {
  try {
- const data = await getDashboardData(12);
+ const force = req.query.refresh === '1';
+ const { data } = await withDurableCache('dashboard', 30 * 60 * 1000, () => getDashboardData(12), () => true, force);
  res.json(data);
  } catch (err) {
  next(err);
@@ -339,24 +342,9 @@ let detailInFlight: Promise<ExpenseDetailResult> | null = null;
 app.get('/api/expense-detail', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- // NOTE: getExpenseDetail() ignores its lookback param - it always builds
- // from Jan 2025. So we cache without varying by ?months=.
- if (!force && detailCache && Date.now() - detailCache.at < DETAIL_TTL_MS) {
- res.json({ cached: true, ...detailCache.data });
- return;
- }
- if (!detailInFlight) {
- detailInFlight = getExpenseDetail()
- .then((data) => {
- detailCache = { at: Date.now(), data };
- return data;
- })
- .finally(() => {
- detailInFlight = null;
- });
- }
- const data = await detailInFlight;
- res.json({ cached: false, ...data });
+ // getExpenseDetail() ignores its lookback param (always builds from Jan 2025).
+ const { data, cached } = await withDurableCache('expense-detail', DETAIL_TTL_MS, getExpenseDetail, () => true, force);
+ res.json({ cached, ...data });
  } catch (err) {
  next(err);
  }
@@ -839,17 +827,8 @@ app.get('/api/qb-balance-sheet', async (req, res, next) => {
  try {
  const method: QbBsMethod = req.query.method === 'Cash' ? 'Cash' : 'Accrual';
  const force = req.query.refresh === '1';
- const cached = qbbsCacheByMethod[method];
- if (!force && cached && Date.now() - cached.at < QBBS_TTL_MS) {
- res.json({ cached: true, ...cached.data });
- return;
- }
- if (!qbbsInFlightByMethod[method]) {
- qbbsInFlightByMethod[method] = getQbBalanceSheet(method)
- .then((data) => { qbbsCacheByMethod[method] = { at: Date.now(), data }; return data; })
- .finally(() => { qbbsInFlightByMethod[method] = null; });
- }
- res.json({ cached: false, ...(await qbbsInFlightByMethod[method]) });
+ const { data, cached } = await withDurableCache(`qb-balance-sheet:${method}`, QBBS_TTL_MS, () => getQbBalanceSheet(method), () => true, force);
+ res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
@@ -864,17 +843,8 @@ app.get('/api/qb-pl-report', async (req, res, next) => {
  try {
  const method: QbPlMethod = req.query.method === 'Cash' ? 'Cash' : 'Accrual';
  const force = req.query.refresh === '1';
- const cached = qbplCacheByMethod[method];
- if (!force && cached && Date.now() - cached.at < QBPL_TTL_MS) {
- res.json({ cached: true, ...cached.data });
- return;
- }
- if (!qbplInFlightByMethod[method]) {
- qbplInFlightByMethod[method] = getQbPlReport(method)
- .then((data) => { qbplCacheByMethod[method] = { at: Date.now(), data }; return data; })
- .finally(() => { qbplInFlightByMethod[method] = null; });
- }
- res.json({ cached: false, ...(await qbplInFlightByMethod[method]) });
+ const { data, cached } = await withDurableCache(`qb-pl-report:${method}`, QBPL_TTL_MS, () => getQbPlReport(method), () => true, force);
+ res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
@@ -1217,16 +1187,8 @@ let ageInFlight: Promise<ArAgingResult> | null = null;
 app.get('/api/ar-aging', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- if (!force && ageCache && Date.now() - ageCache.at < AGE_TTL_MS) {
- res.json({ cached: true, ...ageCache.data });
- return;
- }
- if (!ageInFlight) {
- ageInFlight = getArAging()
- .then((data) => { ageCache = { at: Date.now(), data }; return data; })
- .finally(() => { ageInFlight = null; });
- }
- res.json({ cached: false, ...(await ageInFlight) });
+ const { data, cached } = await withDurableCache('ar-aging', AGE_TTL_MS, getArAging, () => true, force);
+ res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
@@ -1238,16 +1200,8 @@ let mopexInFlight: Promise<MonthlyOpexResult> | null = null;
 app.get('/api/monthly-opex', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- if (!force && mopexCache && Date.now() - mopexCache.at < MOPEX_TTL_MS) {
- res.json({ cached: true, ...mopexCache.data });
- return;
- }
- if (!mopexInFlight) {
- mopexInFlight = getMonthlyOpex()
- .then((data) => { mopexCache = { at: Date.now(), data }; return data; })
- .finally(() => { mopexInFlight = null; });
- }
- res.json({ cached: false, ...(await mopexInFlight) });
+ const { data, cached } = await withDurableCache('monthly-opex', MOPEX_TTL_MS, getMonthlyOpex, () => true, force);
+ res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
@@ -1259,16 +1213,8 @@ let inflowInFlight: Promise<InflowScheduleResult> | null = null;
 app.get('/api/inflow-schedule', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- if (!force && inflowCache && Date.now() - inflowCache.at < INFLOW_TTL_MS) {
- res.json({ cached: true, ...inflowCache.data });
- return;
- }
- if (!inflowInFlight) {
- inflowInFlight = getInflowSchedule()
- .then((data) => { inflowCache = { at: Date.now(), data }; return data; })
- .finally(() => { inflowInFlight = null; });
- }
- res.json({ cached: false, ...(await inflowInFlight) });
+ const { data, cached } = await withDurableCache('inflow-schedule', INFLOW_TTL_MS, getInflowSchedule, () => true, force);
+ res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
@@ -1373,16 +1319,18 @@ async function prewarmQbCaches(): Promise<void> {
  // QB calls - run sequentially (not parallel) to spread out throttle pressure.
  // Each call may take 5-15s; total cycle takes ~1-2 min once an hour.
  await warm('linked', () => getLinkedBalancesCached(true), () => {/* durable cache populated inside */});
- await warm('ar-aging', () => getArAging(), (data, at) => { ageCache = { at, data }; });
- await warm('inflow', () => getInflowSchedule(), (data, at) => { inflowCache = { at, data }; });
+ const noop = () => {/* durable cache populated inside withDurableCache */};
+ await warm('dashboard', () => withDurableCache('dashboard', 30 * 60 * 1000, () => getDashboardData(12), () => true, true), noop);
+ await warm('ar-aging', () => withDurableCache('ar-aging', AGE_TTL_MS, getArAging, () => true, true), noop);
+ await warm('inflow', () => withDurableCache('inflow-schedule', INFLOW_TTL_MS, getInflowSchedule, () => true, true), noop);
  await warm('inventory-purchases', () => getInventoryPurchases(), (data, at) => { invCache = { at, data }; });
- await warm('qb-pl-accrual', () => getQbPlReport('Accrual'), (data, at) => { qbplCacheByMethod.Accrual = { at, data }; });
- await warm('qb-pl-cash', () => getQbPlReport('Cash'), (data, at) => { qbplCacheByMethod.Cash = { at, data }; });
- await warm('qb-bs-accrual', () => getQbBalanceSheet('Accrual'), (data, at) => { qbbsCacheByMethod.Accrual = { at, data }; });
- await warm('qb-bs-cash', () => getQbBalanceSheet('Cash'), (data, at) => { qbbsCacheByMethod.Cash = { at, data }; });
- await warm('expense-detail', () => getExpenseDetail(14), (data, at) => { detailCache = { at, data }; });
- await warm('monthly-opex', () => getMonthlyOpex(), (data, at) => { mopexCache = { at, data }; });
- await warm('current-position', () => getCurrentPositionCached(true), () => {/* durable cache populated inside */});
+ await warm('qb-pl-accrual', () => withDurableCache('qb-pl-report:Accrual', QBPL_TTL_MS, () => getQbPlReport('Accrual'), () => true, true), noop);
+ await warm('qb-pl-cash', () => withDurableCache('qb-pl-report:Cash', QBPL_TTL_MS, () => getQbPlReport('Cash'), () => true, true), noop);
+ await warm('qb-bs-accrual', () => withDurableCache('qb-balance-sheet:Accrual', QBBS_TTL_MS, () => getQbBalanceSheet('Accrual'), () => true, true), noop);
+ await warm('qb-bs-cash', () => withDurableCache('qb-balance-sheet:Cash', QBBS_TTL_MS, () => getQbBalanceSheet('Cash'), () => true, true), noop);
+ await warm('expense-detail', () => withDurableCache('expense-detail', DETAIL_TTL_MS, getExpenseDetail, () => true, true), noop);
+ await warm('monthly-opex', () => withDurableCache('monthly-opex', MOPEX_TTL_MS, getMonthlyOpex, () => true, true), noop);
+ await warm('current-position', () => getCurrentPositionCached(true), noop);
  await warm('mapped-PureX', () => getMappedExpenses('PureX', 14), (data, at) => { mappedCache.set('PureX|14', { at, data }); });
  await warm('mapped-Moysh', () => getMappedExpenses('Moysh', 14), (data, at) => { mappedCache.set('Moysh|14', { at, data }); });
  // Combined is derived (PureX + Moysh) - no separate prewarm needed.

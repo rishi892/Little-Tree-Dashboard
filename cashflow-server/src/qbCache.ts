@@ -26,56 +26,36 @@ export function dropDurableMem(key?: string): void {
 
 export type CacheResult<T> = { data: T; cached: boolean };
 
-export async function withDurableCache<T>(
+function pickNewer<T>(a: Entry<T> | undefined | null, b: Entry<T> | null): Entry<T> | null {
+  if (a && b) return a.at >= b.at ? a : b;
+  return a ?? b ?? null;
+}
+
+/** Recompute (with concurrency coalescing), store on success, fall back to the
+ *  last-good value on a degraded/failed result. */
+async function recompute<T>(
   key: string,
-  ttlMs: number,
   produce: () => Promise<T>,
-  /** Returns true only for a "good" result worth caching (e.g. QB populated, no
-   *  auth warning). A non-good result never overwrites the last good value. */
   isGood: (v: T) => boolean,
-  force = false,
+  fallback: Entry<T> | null,
 ): Promise<CacheResult<T>> {
-  const now = Date.now();
-  const m = mem.get(key) as Entry<T> | undefined;
-  if (!force && m && now - m.at < ttlMs) return { data: m.data, cached: true };
-
-  // Load the durable last-good value (also our fallback if recompute fails).
-  let durable: Entry<T> | null = null;
-  try {
-    const row = await dbSelectOne<{ data: T; updated_at: string }>('qb_cache', `key=eq.${encodeURIComponent(key)}`);
-    if (row) durable = { data: row.data, at: Date.parse(row.updated_at) };
-  } catch {
-    /* DB blip - fall through to in-memory / recompute */
-  }
-  if (!force && durable && now - durable.at < ttlMs) {
-    mem.set(key, durable);
-    return { data: durable.data, cached: true };
-  }
-
-  const fallback = m ?? durable; // best last-good we have
-
-  // Coalesce concurrent recomputes for the same key.
   if (inflight.has(key)) {
     try {
-      const data = (await inflight.get(key)) as T;
-      return { data, cached: false };
+      return { data: (await inflight.get(key)) as T, cached: false };
     } catch {
       if (fallback) return { data: fallback.data, cached: true };
       throw new Error(`${key}: recompute failed and no cached value available`);
     }
   }
-
   const p = produce();
   inflight.set(key, p);
   try {
     const data = await p;
     if (isGood(data)) {
       mem.set(key, { data, at: Date.now() });
-      // fire-and-forget durable write (don't block the response on it)
       void dbUpsert('qb_cache', { key, data, updated_at: new Date().toISOString() }).catch(() => {});
       return { data, cached: false };
     }
-    // Degraded result (e.g. QB momentarily empty) - prefer the last good value.
     if (fallback) return { data: fallback.data, cached: true };
     return { data, cached: false };
   } catch (e) {
@@ -84,4 +64,49 @@ export async function withDurableCache<T>(
   } finally {
     inflight.delete(key);
   }
+}
+
+/**
+ * Stale-while-revalidate: serve a cached value INSTANTLY (even if stale) and
+ * refresh it in the background, so a request never waits on QuickBooks. Only
+ * blocks on a live recompute when there is no cached value at all, when forced
+ * (?refresh=1), or when the cache is so old it would be misleading.
+ */
+export async function withDurableCache<T>(
+  key: string,
+  ttlMs: number,
+  produce: () => Promise<T>,
+  /** True only for a "good" result worth caching. A non-good result never
+   *  overwrites the last good value. */
+  isGood: (v: T) => boolean,
+  force = false,
+): Promise<CacheResult<T>> {
+  const now = Date.now();
+  const m = mem.get(key) as Entry<T> | undefined;
+  if (!force && m && now - m.at < ttlMs) return { data: m.data, cached: true };
+
+  // Pull the durable last-good (survives cold starts; also the refresh fallback).
+  let durable: Entry<T> | null = null;
+  try {
+    const row = await dbSelectOne<{ data: T; updated_at: string }>('qb_cache', `key=eq.${encodeURIComponent(key)}`);
+    if (row) durable = { data: row.data, at: Date.parse(row.updated_at) };
+  } catch {
+    /* DB blip - fall through */
+  }
+
+  const best = pickNewer(m, durable);
+  if (best) mem.set(key, best); // keep the warm copy current
+
+  // Fresh enough → serve it.
+  if (!force && best && now - best.at < ttlMs) return { data: best.data, cached: true };
+
+  // Stale but present, and not ancient → serve stale NOW, refresh in background.
+  const ancient = best ? now - best.at > ttlMs * 4 : true;
+  if (!force && best && !ancient) {
+    void recompute(key, produce, isGood, best).catch(() => {});
+    return { data: best.data, cached: true };
+  }
+
+  // No cached value / forced / ancient → block on a live recompute (rare).
+  return recompute(key, produce, isGood, best);
 }
