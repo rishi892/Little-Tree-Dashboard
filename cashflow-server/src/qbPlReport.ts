@@ -9,6 +9,7 @@
  */
 
 import { QBO_API_BASE } from './config.js';
+import { qboFetch } from './qbHttp.js';
 import { getValidAccessToken } from './oauth.js';
 
 const FIXED_START = { year: 2025, month: 0 }; // Jan 2025
@@ -143,10 +144,7 @@ export async function getQbPlReport(method: AccountingMethod = 'Accrual'): Promi
  const url = `${QBO_API_BASE}/v3/company/${tok.realmId}/reports/ProfitAndLoss`
  + `?start_date=${startDate}&end_date=${endDate}`
  + `&summarize_column_by=Month&accounting_method=${method}&minorversion=70`;
- const res = await fetch(url, {
- headers: { Authorization: `Bearer ${tok.accessToken}`, Accept: 'application/json' },
- });
- if (!res.ok) throw new Error(`QBO P&L ${res.status}: ${await res.text()}`);
+ const res = await qboFetch(url, tok.accessToken);
  const json = await res.json() as { Rows?: { Row: any[] }; Columns?: { Column: Array<{ ColTitle: string }> } };
  const rows = flatten(json.Rows?.Row ?? [], months.length);
  return {

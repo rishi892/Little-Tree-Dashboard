@@ -8,6 +8,7 @@
  */
 
 import { QBO_API_BASE } from './config.js';
+import { qboFetch } from './qbHttp.js';
 import { getValidAccessToken } from './oauth.js';
 
 export type SubPattern = 'FIXED' | 'PERIODIC' | 'VARIABLE';
@@ -141,9 +142,7 @@ async function qboQuery<T>(query: string, accessToken: string, realmId: string, 
  while (true) {
  const q = `${query} STARTPOSITION ${start} MAXRESULTS ${pageSize}`;
  const url = `${QBO_API_BASE}/v3/company/${realmId}/query?query=${encodeURIComponent(q)}&minorversion=70`;
- const res = await fetch(url, {
- headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
- });
+ const res = await qboFetch(url, accessToken);
  if (!res.ok) {
  const body = await res.text();
  throw new Error(`QBO query failed (${res.status}): ${body}`);

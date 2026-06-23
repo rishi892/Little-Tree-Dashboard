@@ -17,6 +17,13 @@ type Entry<T> = { data: T; at: number };
 const mem = new Map<string, Entry<unknown>>();
 const inflight = new Map<string, Promise<unknown>>();
 
+/** Drop the in-memory cache for a key (or all) so the next read re-fetches.
+ *  The durable Supabase copy stays as the fallback. */
+export function dropDurableMem(key?: string): void {
+  if (key) mem.delete(key);
+  else mem.clear();
+}
+
 export type CacheResult<T> = { data: T; cached: boolean };
 
 export async function withDurableCache<T>(

@@ -8,6 +8,7 @@
  */
 
 import { QBO_API_BASE } from './config.js';
+import { qboFetch } from './qbHttp.js';
 import { getValidAccessToken } from './oauth.js';
 
 export type QbBsRow = {
@@ -161,10 +162,7 @@ export async function getQbBalanceSheet(method: BsAccountingMethod = 'Accrual'):
  const url = `${QBO_API_BASE}/v3/company/${tok.realmId}/reports/BalanceSheet`
  + `?start_date=${startDate}&end_date=${endDate}`
  + `&summarize_column_by=Month&accounting_method=${method}&minorversion=70`;
- const res = await fetch(url, {
- headers: { Authorization: `Bearer ${tok.accessToken}`, Accept: 'application/json' },
- });
- if (!res.ok) throw new Error(`QBO Balance Sheet ${res.status}: ${await res.text()}`);
+ const res = await qboFetch(url, tok.accessToken);
  const json = await res.json() as { Header?: { EndPeriod?: string }; Rows?: { Row: any[] } };
  const rows = flatten(json.Rows?.Row ?? [], months.length);
 

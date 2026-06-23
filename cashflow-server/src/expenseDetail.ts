@@ -11,6 +11,7 @@
  */
 
 import { QBO_API_BASE } from './config.js';
+import { qboFetch } from './qbHttp.js';
 import { getValidAccessToken } from './oauth.js';
 import { loadOverrides } from './categoryOverrides.js';
 
@@ -143,9 +144,7 @@ async function fetchPlReport(accessToken: string, realmId: string, startDate: st
  const url = `${QBO_API_BASE}/v3/company/${realmId}/reports/ProfitAndLoss`
  + `?start_date=${startDate}&end_date=${endDate}`
  + `&summarize_column_by=Month&accounting_method=Cash&minorversion=70`;
- const res = await fetch(url, {
- headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
- });
+ const res = await qboFetch(url, accessToken);
  if (!res.ok) throw new Error(`QBO P&L ${res.status}: ${await res.text()}`);
  const json = await res.json();
  return parsePlReport(json);
@@ -158,9 +157,7 @@ async function qboQuery<T>(query: string, accessToken: string, realmId: string, 
  while (true) {
  const q = `${query} STARTPOSITION ${start} MAXRESULTS ${pageSize}`;
  const url = `${QBO_API_BASE}/v3/company/${realmId}/query?query=${encodeURIComponent(q)}&minorversion=70`;
- const res = await fetch(url, {
- headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
- });
+ const res = await qboFetch(url, accessToken);
  if (!res.ok) throw new Error(`QBO ${res.status}: ${await res.text()}`);
  const data = (await res.json()) as { QueryResponse: Record<string, T[]> };
  const batch = data.QueryResponse[key] ?? [];

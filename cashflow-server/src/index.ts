@@ -12,10 +12,10 @@ import { getCachedSubscriptionAudit, invalidateSubscriptionAuditCache } from './
 import { getExpenseDetail, type ExpenseDetailResult } from './expenseDetail.js';
 import { detectRecurringSubscriptions, type RecurringResult } from './recurring.js';
 import { getCashflow13Week, type CashflowResult } from './cashflow13.js';
-import { getCurrentPosition, type CurrentPosition } from './currentPosition.js';
+import { getCurrentPosition } from './currentPosition.js';
 import { getTillerBalances, type TillerBalances } from './tiller.js';
 import { getLinkedBalances, type LinkedBalances } from './linkedAccounts.js';
-import { withDurableCache } from './qbCache.js';
+import { withDurableCache, dropDurableMem } from './qbCache.js';
 import { getArOpen, type ArResult } from './ar.js';
 import { getGelatoAr, type GelatoArResult } from './gelatoAr.js';
 import { getCollectionCurve, type CollectionCurveResult } from './collectionCurve.js';
@@ -144,7 +144,8 @@ app.post('/api/cache/invalidate-all', async (_req, res, next) => {
  try {
   // In-memory caches local to this file
   invalidateExpenseCaches();
-  cpCache = null;
+  dropDurableMem('current-position');
+  dropDurableMem('linked-balances');
   // Dynamically import + invalidate every module-level cache.
   const mods = await Promise.all([
    import('./audit.js'),
@@ -735,28 +736,16 @@ app.get('/api/sales-forecast', async (_req, res, next) => {
 
 // Current Position snapshot - moderate cost (3 QB queries). Cache 5 min.
 const CP_TTL_MS = 30 * 60 * 1000;
-let cpCache: { at: number; data: CurrentPosition } | null = null;
-let cpInFlight: Promise<CurrentPosition> | null = null;
+// Durable-cached: if QB is throttled/down, serve the last good position rather
+// than 500-ing the page.
+const getCurrentPositionCached = (force = false) =>
+  withDurableCache('current-position', CP_TTL_MS, getCurrentPosition, () => true, force);
 
 app.get('/api/current-position', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- if (!force && cpCache && Date.now() - cpCache.at < CP_TTL_MS) {
- res.json({ cached: true, ...cpCache.data });
- return;
- }
- if (!cpInFlight) {
- cpInFlight = getCurrentPosition()
- .then((data) => {
- cpCache = { at: Date.now(), data };
- return data;
- })
- .finally(() => {
- cpInFlight = null;
- });
- }
- const data = await cpInFlight;
- res.json({ cached: false, ...data });
+ const { data, cached } = await getCurrentPositionCached(force);
+ res.json({ cached, ...data });
  } catch (err) {
  next(err);
  }
@@ -1393,7 +1382,7 @@ async function prewarmQbCaches(): Promise<void> {
  await warm('qb-bs-cash', () => getQbBalanceSheet('Cash'), (data, at) => { qbbsCacheByMethod.Cash = { at, data }; });
  await warm('expense-detail', () => getExpenseDetail(14), (data, at) => { detailCache = { at, data }; });
  await warm('monthly-opex', () => getMonthlyOpex(), (data, at) => { mopexCache = { at, data }; });
- await warm('current-position', () => getCurrentPosition(), (data, at) => { cpCache = { at, data }; });
+ await warm('current-position', () => getCurrentPositionCached(true), () => {/* durable cache populated inside */});
  await warm('mapped-PureX', () => getMappedExpenses('PureX', 14), (data, at) => { mappedCache.set('PureX|14', { at, data }); });
  await warm('mapped-Moysh', () => getMappedExpenses('Moysh', 14), (data, at) => { mappedCache.set('Moysh|14', { at, data }); });
  // Combined is derived (PureX + Moysh) - no separate prewarm needed.

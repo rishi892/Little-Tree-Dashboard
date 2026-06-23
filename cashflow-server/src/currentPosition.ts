@@ -15,6 +15,7 @@
  */
 
 import { QBO_API_BASE } from './config.js';
+import { qboFetch } from './qbHttp.js';
 import { getValidAccessToken } from './oauth.js';
 
 // --- Sheet baselines / fallbacks ---
@@ -105,10 +106,7 @@ export type CurrentPosition = {
 async function qboGet<T>(pathAndQuery: string): Promise<T> {
  const tokens = await getValidAccessToken();
  const url = `${QBO_API_BASE}/v3/company/${tokens.realmId}/${pathAndQuery}`;
- const res = await fetch(url, {
- headers: { Authorization: `Bearer ${tokens.accessToken}`, Accept: 'application/json' },
- });
- if (!res.ok) throw new Error(`QBO request failed (${res.status}): ${await res.text()}`);
+ const res = await qboFetch(url, tokens.accessToken);
  return (await res.json()) as T;
 }
 

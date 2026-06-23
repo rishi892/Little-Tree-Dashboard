@@ -8,6 +8,7 @@
  */
 
 import { QBO_API_BASE } from './config.js';
+import { qboFetch } from './qbHttp.js';
 import { getValidAccessToken } from './oauth.js';
 import { getTillerBalances, type TillerAccount } from './tiller.js';
 import {
@@ -30,8 +31,7 @@ async function qboGetAccounts(types: string[]): Promise<QbAccount[]> {
  const typeClause = types.map((t) => `'${t}'`).join(',');
  const q = encodeURIComponent(`select * from Account where AccountType in (${typeClause})`);
  const url = `${QBO_API_BASE}/v3/company/${tok.realmId}/query?query=${q}&minorversion=70`;
- const r = await fetch(url, { headers: { Authorization: `Bearer ${tok.accessToken}`, Accept: 'application/json' } });
- if (!r.ok) throw new Error(`QB query failed: ${r.status} ${await r.text()}`);
+ const r = await qboFetch(url, tok.accessToken);
  const d = (await r.json()) as AccountQueryResponse;
  return (d.QueryResponse.Account ?? []).filter((a) => a.Active !== false);
 }

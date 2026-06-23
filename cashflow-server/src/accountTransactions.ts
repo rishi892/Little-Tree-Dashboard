@@ -15,6 +15,7 @@
 
 import { QBO_API_BASE } from './config.js';
 import { getValidAccessToken } from './oauth.js';
+import { qboFetch } from './qbHttp.js';
 
 const FIXED_START = '2025-01-01';
 
@@ -80,7 +81,7 @@ async function qboQuery<T>(query: string, accessToken: string, realmId: string, 
  while (true) {
  const q = `${query} STARTPOSITION ${start} MAXRESULTS ${pageSize}`;
  const url = `${QBO_API_BASE}/v3/company/${realmId}/query?query=${encodeURIComponent(q)}&minorversion=70`;
- const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
+ const res = await qboFetch(url, accessToken);
  if (!res.ok) throw new Error(`QBO query ${res.status}: ${await res.text()}`);
  const data = (await res.json()) as { QueryResponse: Record<string, T[]> };
  const batch = data.QueryResponse[key] ?? [];
@@ -120,7 +121,7 @@ async function fetchAccountTxnDetail(
  + `&account=${accountId}`
  + `&accounting_method=Cash`
  + `&minorversion=70`;
- const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' } });
+ const res = await qboFetch(url, accessToken);
  if (!res.ok) throw new Error(`QBO TransactionDetailByAccount ${res.status}: ${await res.text()}`);
  const json = await res.json() as { Rows?: { Row: any[] } };
 
