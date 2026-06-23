@@ -38,9 +38,24 @@ create table if not exists login_events (
 alter table login_events enable row level security;
 
 -- ---------------------------------------------------------------------------
--- QUICKBOOKS OAUTH - access + refresh tokens in real columns so the connection
--- survives restarts/redeploys and never silently drops.
+-- QUICKBOOKS OAUTH
 -- ---------------------------------------------------------------------------
+
+-- App-level OAuth config (single row, id=1): client id/secret, redirect uri,
+-- environment. Stored here so the WHOLE QB connection lives in the DB and never
+-- depends on a fragile env var. Code falls back to env vars per-field if empty.
+create table if not exists qb_config (
+  id            integer primary key default 1,
+  client_id     text not null,
+  client_secret text not null,
+  redirect_uri  text not null,
+  environment   text not null default 'production',  -- production | sandbox
+  updated_at    timestamptz default now()
+);
+alter table qb_config enable row level security;
+
+-- Per-connection tokens: access + refresh in real columns so the connection
+-- survives restarts/redeploys and never silently drops.
 create table if not exists qb_tokens (
   realm_id      text primary key,
   access_token  text not null,

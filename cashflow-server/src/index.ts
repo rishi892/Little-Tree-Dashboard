@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import { config } from './config.js';
 import { buildAuthUrl, exchangeCodeForTokens } from './oauth.js';
+import { qbCredsConfigured } from './qbConfig.js';
 import { loadTokens, clearTokens } from './tokenStore.js';
 import { getDashboardData } from './qbo.js';
 import { getCachedSubscriptionAudit, invalidateSubscriptionAuditCache } from './audit.js';
@@ -111,7 +112,7 @@ app.get('/api/status', async (_req, res) => {
  res.json({
  connected: !!tokens,
  realmId: tokens?.realmId ?? null,
- credsConfigured: config.qbo.credsConfigured,
+ credsConfigured: await qbCredsConfigured(),
  });
 });
 
@@ -239,8 +240,8 @@ app.delete('/api/category-overrides', async (_req, res, next) => {
  } catch (err) { next(err); }
 });
 
-app.get('/auth/connect', (_req, res) => {
- res.redirect(buildAuthUrl());
+app.get('/auth/connect', async (_req, res, next) => {
+ try { res.redirect(await buildAuthUrl()); } catch (e) { next(e); }
 });
 
 app.get('/auth/callback', async (req: Request, res: Response, next: NextFunction) => {

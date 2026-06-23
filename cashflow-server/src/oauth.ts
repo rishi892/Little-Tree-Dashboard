@@ -1,22 +1,30 @@
 import crypto from 'node:crypto';
 import OAuthClient from 'intuit-oauth';
-import { config } from './config.js';
+import { loadQbConfig } from './qbConfig.js';
 import { loadTokens, saveTokens, invalidateTokenCache, type StoredTokens } from './tokenStore.js';
 
+// The OAuth client is built from the qb_config table (client id/secret/redirect/
+// environment). Rebuild only when those values actually change, so an admin edit
+// to qb_config is picked up without a restart.
 let _client: OAuthClient | null = null;
-function getOauthClient(): OAuthClient {
- if (_client) return _client;
+let _clientSig = '';
+async function getOauthClient(): Promise<OAuthClient> {
+ const c = await loadQbConfig();
+ const sig = `${c.clientId}|${c.clientSecret}|${c.environment}|${c.redirectUri}`;
+ if (_client && sig === _clientSig) return _client;
  _client = new OAuthClient({
- clientId: config.qbo.clientId,
- clientSecret: config.qbo.clientSecret,
- environment: config.qbo.environment,
- redirectUri: config.qbo.redirectUri,
+ clientId: c.clientId,
+ clientSecret: c.clientSecret,
+ environment: c.environment,
+ redirectUri: c.redirectUri,
  });
+ _clientSig = sig;
  return _client;
 }
 
-export function buildAuthUrl(): string {
- return getOauthClient().authorizeUri({
+export async function buildAuthUrl(): Promise<string> {
+ const client = await getOauthClient();
+ return client.authorizeUri({
  scope: [OAuthClient.scopes.Accounting],
  state: crypto.randomBytes(16).toString('hex'),
  });
@@ -30,7 +38,8 @@ type IntuitTokenJson = {
 };
 
 export async function exchangeCodeForTokens(reqUrl: string, realmId: string): Promise<StoredTokens> {
- const authResponse = await getOauthClient().createToken(reqUrl);
+ const client = await getOauthClient();
+ const authResponse = await client.createToken(reqUrl);
  const json = authResponse.getJson() as IntuitTokenJson;
  const tokens: StoredTokens = {
  accessToken: json.access_token,
@@ -70,7 +79,7 @@ export async function getValidAccessToken(): Promise<StoredTokens> {
 
  refreshInFlight = (async () => {
  try {
- const client = getOauthClient();
+ const client = await getOauthClient();
  client.setToken({
  access_token: tokens.accessToken,
  refresh_token: tokens.refreshToken,
