@@ -24,7 +24,6 @@ import { getSettlementHistory, type SettlementHistoryResult } from './settlement
 import { getArAging, type ArAgingResult } from './arAging.js';
 import { getMonthlyOpex, type MonthlyOpexResult } from './monthlyOpex.js';
 import { getInflowSchedule, type InflowScheduleResult } from './inflowSchedule.js';
-import { getSheetPayroll, type SheetPayrollResult } from './sheetPayroll.js';
 import { getSheetExpenses, type SheetExpensesResult } from './sheetExpenses.js';
 import { getMappedExpenses, invalidateMappedExpensesCache, type MappedExpensesResult, type SheetEntity } from './mappedExpenses.js';
 import { getQbPlReport, type QbPlReport } from './qbPlReport.js';
@@ -129,12 +128,10 @@ app.post('/api/disconnect', async (_req, res) => {
 // data is invalidated on every mutation so the next request rebuilds.
 
 function invalidateExpenseCaches() {
- // null out every cache that depends on QB expense detail or sheet mapping
- detailCache = null;
- cfCache = null;
- cfPastCache = null;
- mopexCache = null;
- mappedCache.clear();
+ // Drop the durable caches that depend on QB expense detail / sheet mapping so
+ // the next read rebuilds them.
+ for (const k of ['expense-detail', 'monthly-opex', 'cashflow-13week:future', 'cashflow-13week:past',
+   'mapped-expenses:PureX:14', 'mapped-expenses:Moysh:14']) dropDurableMem(k);
 }
 
 // Global cache invalidation - clears every known module cache in one call so
@@ -301,8 +298,6 @@ app.get('/api/subscription-audit', async (req, res, next) => {
 
 // Recurring subscriptions detected from QBO transaction history.
 const RECURRING_TTL_MS = 30 * 60 * 1000;
-let recurringCache: { at: number; data: RecurringResult } | null = null;
-let recurringInFlight: Promise<RecurringResult> | null = null;
 
 app.get('/api/recurring-subscriptions', async (req, res, next) => {
  try {
@@ -317,8 +312,6 @@ app.get('/api/recurring-subscriptions', async (req, res, next) => {
 
 // Live expense detail - heavy (Purchase + Bill lines), so cache for 10 min with ?refresh=1 override.
 const DETAIL_TTL_MS = 30 * 60 * 1000;
-let detailCache: { at: number; data: ExpenseDetailResult } | null = null;
-let detailInFlight: Promise<ExpenseDetailResult> | null = null;
 
 app.get('/api/expense-detail', async (req, res, next) => {
  try {
@@ -337,23 +330,23 @@ app.get('/api/expense-detail', async (req, res, next) => {
 // Invoice Tracker reflect within 30s. The QB-derived inputs (Payroll,
 // Inventory, Other Expenses) use their own 60-min cached values inside,
 // so we don't re-hit QB on every cashflow refresh.
-const CF_TTL_MS = 30 * 1000;
-let cfCache: { at: number; data: CashflowResult } | null = null;
-let cfInFlight: Promise<CashflowResult> | null = null;
-let cfPastCache: { at: number; data: CashflowResult } | null = null;
-let cfPastInFlight: Promise<CashflowResult> | null = null;
+
+// 13-week is durable-cached (5 min, stale-while-revalidate): outflows come from
+// the shared cached expense source, inflows from the live sheet.
+const getCashflow13WeekCached = (direction: 'future' | 'past', force = false) =>
+ withDurableCache(
+ `cashflow-13week:${direction}`,
+ 5 * 60 * 1000,
+ () => getCashflow13Week(direction === 'past' ? { direction: 'past' } : undefined),
+ (d) => Array.isArray((d as { weeks?: unknown[] }).weeks) && (d as { weeks: unknown[] }).weeks.length > 0,
+ force,
+ );
 
 app.get('/api/cashflow-13week', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
  const direction = req.query.direction === 'past' ? 'past' : 'future';
- const { data, cached } = await withDurableCache(
- `cashflow-13week:${direction}`,
- 5 * 60 * 1000, // 5 min: serve instantly, refresh in background
- () => getCashflow13Week(direction === 'past' ? { direction: 'past' } : undefined),
- (d) => Array.isArray((d as { weeks?: unknown[] }).weeks) && (d as { weeks: unknown[] }).weeks.length > 0,
- force,
- );
+ const { data, cached } = await getCashflow13WeekCached(direction, force);
  res.json({ cached, direction, ...data });
  } catch (err) {
  next(err);
@@ -420,7 +413,9 @@ app.post('/api/cashflow-overrides', async (req, res, next) => {
  ccUtilisationByWeek: body.ccUtilisationByWeek ?? current.ccUtilisationByWeek,
  };
  await saveCfOverrides(next);
- cfCache = null; // invalidate 13-week cache so next read picks up new overrides
+ // invalidate the 13-week durable cache so the next read picks up new overrides
+ dropDurableMem('cashflow-13week:future');
+ dropDurableMem('cashflow-13week:past');
  res.json(next);
  } catch (err) { next(err); }
 });
@@ -857,8 +852,6 @@ app.get('/api/account-transactions', async (req, res, next) => {
 // Pulled separately from the P&L flow because inventory accounting in QB
 // posts to Balance Sheet, not P&L.
 const INV_TTL_MS = 30 * 60 * 1000;
-let invCache: { at: number; data: InventoryPurchasesResult } | null = null;
-let invInFlight: Promise<InventoryPurchasesResult> | null = null;
 
 app.get('/api/inventory-purchases', async (req, res, next) => {
  try {
@@ -1016,8 +1009,6 @@ app.get('/api/ar/open', async (req, res, next) => {
 
 // Mapped expenses - sheet-structured categories with QB-live values.
 const MAPPED_TTL_MS = 30 * 60 * 1000;
-const mappedCache = new Map<string, { at: number; data: MappedExpensesResult }>();
-const mappedInFlight = new Map<string, Promise<MappedExpensesResult>>();
 
 app.get('/api/expenses-mapped', async (req, res, next) => {
  try {
@@ -1121,8 +1112,6 @@ app.get('/api/settlement-history', async (req, res, next) => {
 
 // AR Aging - Gelato Pending invoices aged + collection probability + pred week.
 const AGE_TTL_MS = 30 * 60 * 1000;
-let ageCache: { at: number; data: ArAgingResult } | null = null;
-let ageInFlight: Promise<ArAgingResult> | null = null;
 
 app.get('/api/ar-aging', async (req, res, next) => {
  try {
@@ -1134,8 +1123,6 @@ app.get('/api/ar-aging', async (req, res, next) => {
 
 // Monthly OpEx - LT vs PureX split, per month, with PureX remitted.
 const MOPEX_TTL_MS = 30 * 60 * 1000;
-let mopexCache: { at: number; data: MonthlyOpexResult } | null = null;
-let mopexInFlight: Promise<MonthlyOpexResult> | null = null;
 
 app.get('/api/monthly-opex', async (req, res, next) => {
  try {
@@ -1147,35 +1134,12 @@ app.get('/api/monthly-opex', async (req, res, next) => {
 
 // Inflow Schedule - weekly receivables forecast per source.
 const INFLOW_TTL_MS = 30 * 60 * 1000;
-let inflowCache: { at: number; data: InflowScheduleResult } | null = null;
-let inflowInFlight: Promise<InflowScheduleResult> | null = null;
 
 app.get('/api/inflow-schedule', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
  const { data, cached } = await withDurableCache('inflow-schedule', INFLOW_TTL_MS, getInflowSchedule, () => true, force);
  res.json({ cached, ...data });
- } catch (err) { next(err); }
-});
-
-// Payroll from sheet - parsed from Expenses tab "Payroll" entries.
-const SP_TTL_MS = 10 * 1000;
-let spCache: { at: number; data: SheetPayrollResult } | null = null;
-let spInFlight: Promise<SheetPayrollResult> | null = null;
-
-app.get('/api/sheet-payroll', async (req, res, next) => {
- try {
- const force = req.query.refresh === '1';
- if (!force && spCache && Date.now() - spCache.at < SP_TTL_MS) {
- res.json({ cached: true, ...spCache.data });
- return;
- }
- if (!spInFlight) {
- spInFlight = getSheetPayroll()
- .then((data) => { spCache = { at: Date.now(), data }; return data; })
- .finally(() => { spInFlight = null; });
- }
- res.json({ cached: false, ...(await spInFlight) });
  } catch (err) { next(err); }
 });
 
@@ -1243,14 +1207,13 @@ async function prewarmSheetCaches(): Promise<void> {
  warm('gelato-ar', () => getGelatoAr(), (data, at) => { gelatoCache = { at, data }; }),
  warm('settlement', () => getSettlementHistory(), (data, at) => { settleCache = { at, data }; }),
  warm('purex-clearing', () => getPurexClearing(), (data, at) => { purexCache = { at, data }; }),
- warm('sheet-payroll', () => getSheetPayroll(), (data, at) => { spCache = { at, data }; }),
  warm('sheet-expenses', () => getSheetExpenses(), (data, at) => { seCache = { at, data }; }),
  ]);
  // Cashflow-13week reads sheet AR live each call, but its QB-side inputs
  // (mappedExpenses / inventoryPurchases) are served from their own 60-min
  // module caches - so re-warming here is cheap and propagates fresh sheet
  // data to the 13-week table within 30s of an invoice add.
- await warm('cashflow-13week', () => getCashflow13Week(), (data, at) => { cfCache = { at, data }; });
+ await warm('cashflow-13week', () => getCashflow13WeekCached('future', true), () => {});
  console.log(`[prefetch sheets] refreshed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 }
 
@@ -1263,7 +1226,7 @@ async function prewarmQbCaches(): Promise<void> {
  await warm('dashboard', () => withDurableCache('dashboard', 30 * 60 * 1000, () => getDashboardData(12), () => true, true), noop);
  await warm('ar-aging', () => withDurableCache('ar-aging', AGE_TTL_MS, getArAging, () => true, true), noop);
  await warm('inflow', () => withDurableCache('inflow-schedule', INFLOW_TTL_MS, getInflowSchedule, () => true, true), noop);
- await warm('inventory-purchases', () => getInventoryPurchases(), (data, at) => { invCache = { at, data }; });
+ await warm('inventory-purchases', () => withDurableCache('inventory-purchases', INV_TTL_MS, getInventoryPurchases, (d) => d.total > 0, true), noop);
  await warm('qb-pl-accrual', () => withDurableCache('qb-pl-report:Accrual', QBPL_TTL_MS, () => getQbPlReport('Accrual'), () => true, true), noop);
  await warm('qb-pl-cash', () => withDurableCache('qb-pl-report:Cash', QBPL_TTL_MS, () => getQbPlReport('Cash'), () => true, true), noop);
  await warm('qb-bs-accrual', () => withDurableCache('qb-balance-sheet:Accrual', QBBS_TTL_MS, () => getQbBalanceSheet('Accrual'), () => true, true), noop);
@@ -1271,11 +1234,11 @@ async function prewarmQbCaches(): Promise<void> {
  await warm('expense-detail', () => withDurableCache('expense-detail', DETAIL_TTL_MS, getExpenseDetail, () => true, true), noop);
  await warm('monthly-opex', () => withDurableCache('monthly-opex', MOPEX_TTL_MS, getMonthlyOpex, () => true, true), noop);
  await warm('current-position', () => getCurrentPositionCached(true), noop);
- await warm('mapped-PureX', () => getMappedExpenses('PureX', 14), (data, at) => { mappedCache.set('PureX|14', { at, data }); });
- await warm('mapped-Moysh', () => getMappedExpenses('Moysh', 14), (data, at) => { mappedCache.set('Moysh|14', { at, data }); });
+ await warm('mapped-PureX', () => getMappedExpenses('PureX', 14, true), noop);
+ await warm('mapped-Moysh', () => getMappedExpenses('Moysh', 14, true), noop);
  // Combined is derived (PureX + Moysh) - no separate prewarm needed.
  // cashflow-13week depends on the above, run it last.
- await warm('cashflow-13week', () => getCashflow13Week(), (data, at) => { cfCache = { at, data }; });
+ await warm('cashflow-13week', () => getCashflow13WeekCached('future', true), noop);
  console.log(`[prefetch qb] refreshed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 }
 
