@@ -11,6 +11,21 @@
  * silently refreshes when QB is healthy again.
  */
 import { dbSelectOne, dbUpsert } from './db.js';
+import { waitUntil } from '@vercel/functions';
+
+/** Run a background refresh that is GUARANTEED to finish even after the HTTP
+ * response is sent. On Vercel, waitUntil keeps the serverless function alive
+ * until it settles (otherwise the function freezes and the refresh is lost, so
+ * the cache would never update). Off Vercel (local), waitUntil throws and we
+ * just let the promise run best-effort. */
+function background(p: Promise<unknown>): void {
+  const done = p.catch(() => {});
+  try {
+    waitUntil(done);
+  } catch {
+    void done; // not in a Vercel request context
+  }
+}
 
 type Entry<T> = { data: T; at: number };
 
@@ -100,10 +115,11 @@ export async function withDurableCache<T>(
   // Fresh enough → serve it.
   if (!force && best && now - best.at < ttlMs) return { data: best.data, cached: true };
 
-  // Stale but present, and not ancient → serve stale NOW, refresh in background.
+  // Stale but present, and not ancient → serve stale NOW, refresh in background
+  // (guaranteed to complete via waitUntil, so the cache actually updates).
   const ancient = best ? now - best.at > ttlMs * 4 : true;
   if (!force && best && !ancient) {
-    void recompute(key, produce, isGood, best).catch(() => {});
+    background(recompute(key, produce, isGood, best));
     return { data: best.data, cached: true };
   }
 
