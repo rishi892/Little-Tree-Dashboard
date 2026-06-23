@@ -12,9 +12,7 @@
  * }
  */
 
-import { fileStore as fs } from './kvStore.js';
-
-const FILE = '.cashflow-overrides.json';
+import { dbSelectOne, dbUpsert } from './db.js';
 
 export type CfOverrideMode = 'manual' | 'auto';
 
@@ -33,22 +31,16 @@ let cache: CfOverrides | null = null;
 
 export async function loadCfOverrides(): Promise<CfOverrides> {
  if (cache) return cache;
- try {
- const raw = await fs.readFile(FILE, 'utf8');
- const parsed = JSON.parse(raw) as Partial<CfOverrides>;
- cache = {
- mode: parsed.mode === 'auto' ? 'auto' : 'manual',
- ccUtilisationByWeek: parsed.ccUtilisationByWeek ?? {},
- };
- } catch {
- cache = { ...DEFAULT_OVERRIDES };
- }
+ const row = await dbSelectOne<{ mode: string; cc_utilisation_by_week: Record<string, number> }>('cashflow_overrides', 'id=eq.1');
+ cache = row
+ ? { mode: row.mode === 'auto' ? 'auto' : 'manual', ccUtilisationByWeek: row.cc_utilisation_by_week ?? {} }
+ : { ...DEFAULT_OVERRIDES };
  return cache;
 }
 
 export async function saveCfOverrides(next: CfOverrides): Promise<void> {
  cache = next;
- await fs.writeFile(FILE, JSON.stringify(next, null, 2), 'utf8');
+ await dbUpsert('cashflow_overrides', { id: 1, mode: next.mode, cc_utilisation_by_week: next.ccUtilisationByWeek });
 }
 
 /** Returns the 13-element ccUtilisation array (filled from manual overrides). */

@@ -8,9 +8,7 @@
  * Stored on disk in .commission-overrides.json so they survive restart.
  */
 
-import { fileStore as fs } from './kvStore.js';
-
-const FILE = '.commission-overrides.json';
+import { dbSelect, dbUpsert, dbDelete } from './db.js';
 
 export type OverrideType = 'NEW' | 'OLD' | 'WHITELABEL';
 
@@ -26,32 +24,25 @@ export type CommissionOverrides = {
 
 let _cache: CommissionOverrides | null = null;
 
+type Row = { invoice_number: string; type: string | null; rep: string | null };
+
 async function load(): Promise<CommissionOverrides> {
  if (_cache) return _cache;
- try {
-   const raw = await fs.readFile(FILE, 'utf8');
-   const parsed = JSON.parse(raw);
-   // Migrate v1 (overrides: Record<string, OverrideType>) -> v2.
-   if (parsed.version === 1 || (parsed.overrides && Object.values(parsed.overrides).some((v) => typeof v === 'string'))) {
-     const migrated: Record<string, InvoiceOverride> = {};
-     for (const [k, v] of Object.entries(parsed.overrides ?? {})) {
-       if (typeof v === 'string') migrated[k] = { type: v as OverrideType };
-       else migrated[k] = v as InvoiceOverride;
-     }
-     _cache = { version: 2, overrides: migrated };
-     await save();
-   } else {
-     _cache = { version: 2, overrides: parsed.overrides ?? {} };
-   }
- } catch {
-   _cache = { version: 2, overrides: {} };
+ const rows = await dbSelect<Row>('commission_overrides');
+ const overrides: Record<string, InvoiceOverride> = {};
+ for (const r of rows) {
+   overrides[r.invoice_number] = {
+     ...(r.type ? { type: r.type as OverrideType } : {}),
+     ...(r.rep ? { rep: r.rep } : {}),
+   };
  }
+ _cache = { version: 2, overrides };
  return _cache;
 }
 
-async function save(): Promise<void> {
- if (!_cache) return;
- await fs.writeFile(FILE, JSON.stringify(_cache, null, 2), 'utf8');
+async function persistRow(k: string, ov: InvoiceOverride): Promise<void> {
+ if (!ov.type && !ov.rep) await dbDelete('commission_overrides', `invoice_number=eq.${encodeURIComponent(k)}`);
+ else await dbUpsert('commission_overrides', { invoice_number: k, type: ov.type ?? null, rep: ov.rep ?? '' });
 }
 
 export async function getCommissionOverrides(): Promise<CommissionOverrides> {
@@ -66,9 +57,9 @@ export async function setCommissionOverride(invoiceNumber: string, type: Overrid
  const existing = c.overrides[k] ?? {};
  if (type === null) delete existing.type;
  else existing.type = type;
- if (Object.keys(existing).length === 0) delete c.overrides[k];
+ if (!existing.type && !existing.rep) delete c.overrides[k];
  else c.overrides[k] = existing;
- await save();
+ await persistRow(k, existing);
  return c;
 }
 
@@ -80,8 +71,8 @@ export async function setCommissionRepOverride(invoiceNumber: string, rep: strin
  const existing = c.overrides[k] ?? {};
  if (!rep) delete existing.rep;
  else existing.rep = rep.trim();
- if (Object.keys(existing).length === 0) delete c.overrides[k];
+ if (!existing.type && !existing.rep) delete c.overrides[k];
  else c.overrides[k] = existing;
- await save();
+ await persistRow(k, existing);
  return c;
 }

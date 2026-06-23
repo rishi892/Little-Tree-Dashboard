@@ -27,7 +27,7 @@ export async function dbSelect<T = Record<string, unknown>>(table: string, query
 }
 
 /** Insert a row (fire-and-forget; failures are swallowed). */
-export async function dbInsert(table: string, row: Record<string, unknown>): Promise<void> {
+export async function dbInsert(table: string, row: Record<string, unknown> | Record<string, unknown>[]): Promise<void> {
   if (!dbEnabled) return;
   try {
     await fetch(`${SUPA_URL}/rest/v1/${table}`, {
@@ -38,4 +38,30 @@ export async function dbInsert(table: string, row: Record<string, unknown>): Pro
   } catch {
     /* best-effort */
   }
+}
+
+/** Upsert one or more rows (insert or merge on the primary key). */
+export async function dbUpsert(table: string, row: Record<string, unknown> | Record<string, unknown>[]): Promise<void> {
+  if (!dbEnabled) return;
+  await fetch(`${SUPA_URL}/rest/v1/${table}`, {
+    method: 'POST',
+    headers: headers({ 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates,return=minimal' }),
+    body: JSON.stringify(row),
+  });
+}
+
+/** Delete rows matching a PostgREST filter (e.g. `id=eq.123`, or
+ *  `<pk>=not.is.null` to wipe a table). */
+export async function dbDelete(table: string, query: string): Promise<void> {
+  if (!dbEnabled) return;
+  await fetch(`${SUPA_URL}/rest/v1/${table}?${query}`, {
+    method: 'DELETE',
+    headers: headers({ Prefer: 'return=minimal' }),
+  });
+}
+
+/** Select a single row (or null). */
+export async function dbSelectOne<T = Record<string, unknown>>(table: string, query = ''): Promise<T | null> {
+  const rows = await dbSelect<T>(table, query ? `${query}&limit=1` : 'limit=1');
+  return rows[0] ?? null;
 }

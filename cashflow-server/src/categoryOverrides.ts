@@ -11,9 +11,7 @@
  * are optional - user can override only paidBy, only lineItem, or both.
  */
 
-import { fileStore as fs } from './kvStore.js';
-
-const OVERRIDES_FILE = '.category-overrides.json';
+import { dbSelect, dbUpsert, dbDelete } from './db.js';
 
 export type OverridePaidBy = 'PureX' | 'Moysh' | 'Combined' | 'Other';
 export type CategoryOverride = {
@@ -25,33 +23,33 @@ export type AllOverrides = Record<string, CategoryOverride>;
 
 let cache: AllOverrides | null = null;
 
+type Row = { account: string; paid_by: string | null; line_item: string | null };
+
 export async function loadOverrides(): Promise<AllOverrides> {
  if (cache) return cache;
- try {
- const raw = await fs.readFile(OVERRIDES_FILE, 'utf8');
- cache = JSON.parse(raw) as AllOverrides;
- return cache;
- } catch {
- cache = {};
- return cache;
+ const rows = await dbSelect<Row>('category_overrides');
+ const all: AllOverrides = {};
+ for (const r of rows) {
+ all[r.account] = {
+ ...(r.paid_by ? { paidBy: r.paid_by as OverridePaidBy } : {}),
+ ...(r.line_item ? { lineItem: r.line_item } : {}),
+ };
  }
+ cache = all;
+ return cache;
 }
 
 export async function setOverride(account: string, value: CategoryOverride): Promise<AllOverrides> {
  const all = await loadOverrides();
- // Merge: missing keys preserved.
- const merged: CategoryOverride = {
- ...(all[account] ?? {}),
- ...value,
- };
- // If both fields cleared, drop the key entirely.
+ const merged: CategoryOverride = { ...(all[account] ?? {}), ...value };
  if (!merged.paidBy && !merged.lineItem) {
  delete all[account];
+ await dbDelete('category_overrides', `account=eq.${encodeURIComponent(account)}`);
  } else {
  all[account] = merged;
+ await dbUpsert('category_overrides', { account, paid_by: merged.paidBy ?? null, line_item: merged.lineItem ?? '' });
  }
  cache = { ...all };
- await fs.writeFile(OVERRIDES_FILE, JSON.stringify(cache, null, 2), 'utf8');
  return cache;
 }
 
@@ -59,15 +57,15 @@ export async function clearOverride(account: string): Promise<AllOverrides> {
  const all = await loadOverrides();
  if (all[account]) {
  delete all[account];
+ await dbDelete('category_overrides', `account=eq.${encodeURIComponent(account)}`);
  cache = { ...all };
- await fs.writeFile(OVERRIDES_FILE, JSON.stringify(cache, null, 2), 'utf8');
  }
  return cache ?? {};
 }
 
 export async function clearAllOverrides(): Promise<AllOverrides> {
  cache = {};
- await fs.writeFile(OVERRIDES_FILE, JSON.stringify(cache, null, 2), 'utf8');
+ await dbDelete('category_overrides', 'account=not.is.null');
  return cache;
 }
 

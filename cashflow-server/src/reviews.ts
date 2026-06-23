@@ -14,10 +14,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fileStore } from './kvStore.js';
+import { dbSelect, dbSelectOne, dbUpsert } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FILE = '.reviews.json';                          // kv key (Supabase in prod, local file in dev)
 export const UPLOAD_DIR = path.resolve(__dirname, '..', '.review-uploads');
 
 export type Review = {
@@ -42,27 +41,28 @@ export type Review = {
   auditNote: string;
 };
 
-let cache: Review[] | null = null;
-
-async function read(): Promise<Review[]> {
-  if (cache) return cache;
-  try {
-    cache = JSON.parse(await fileStore.readFile(FILE)) as Review[];
-  } catch {
-    cache = [];
-  }
-  return cache;
+type Row = Record<string, string>;
+function rowToReview(r: Row): Review {
+  return {
+    id: r.id, at: r.at, kind: r.kind as Review['kind'], verdict: r.verdict, user: r.user_email, role: r.role,
+    page: r.page, section: r.section, tab: r.tab, subtab: r.subtab, comment: r.comment,
+    screenshot: r.screenshot, status: r.status as Review['status'], resolvedBy: r.resolved_by, resolvedAt: r.resolved_at,
+    note: r.note, auditedBy: r.audited_by, auditedAt: r.audited_at, auditNote: r.audit_note,
+  };
 }
-
-async function write(list: Review[]): Promise<void> {
-  cache = list;
-  await fileStore.writeFile(FILE, JSON.stringify(list, null, 2));
+function reviewToRow(v: Review): Record<string, unknown> {
+  return {
+    id: v.id, at: v.at, kind: v.kind, verdict: v.verdict, user_email: v.user, role: v.role,
+    page: v.page, section: v.section, tab: v.tab, subtab: v.subtab, comment: v.comment,
+    screenshot: v.screenshot, status: v.status, resolved_by: v.resolvedBy, resolved_at: v.resolvedAt,
+    note: v.note, audited_by: v.auditedBy, audited_at: v.auditedAt, audit_note: v.auditNote,
+  };
 }
 
 /** All reviews, newest first. */
 export async function loadReviews(): Promise<Review[]> {
-  const list = await read();
-  return [...list].sort((a, b) => (b.at || '').localeCompare(a.at || ''));
+  const rows = await dbSelect<Row>('reviews', 'order=at.desc');
+  return rows.map(rowToReview);
 }
 
 const EXT: Record<string, string> = {
@@ -118,33 +118,31 @@ export async function addReview(p: Record<string, unknown>): Promise<Review> {
     auditNote: '',
   };
 
-  const list = await read();
-  list.push(review);
-  await write(list);
+  await dbUpsert('reviews', reviewToRow(review));
   return review;
 }
 
 export async function resolveReview(id: string, resolvedBy: string, note: string): Promise<Review | null> {
-  const list = await read();
-  const r = list.find((x) => x.id === id);
-  if (!r) return null;
+  const row = await dbSelectOne<Row>('reviews', `id=eq.${encodeURIComponent(id)}`);
+  if (!row) return null;
+  const r = rowToReview(row);
   r.status = 'Resolved';
   r.resolvedBy = resolvedBy || '';
   r.resolvedAt = new Date().toISOString();
   r.note = note || '';
-  await write(list);
+  await dbUpsert('reviews', reviewToRow(r));
   return r;
 }
 
 /** Second sign-off: a (preferably different) person verifies the resolution. */
 export async function auditReview(id: string, auditedBy: string, auditNote: string): Promise<Review | null> {
-  const list = await read();
-  const r = list.find((x) => x.id === id);
-  if (!r) return null;
+  const row = await dbSelectOne<Row>('reviews', `id=eq.${encodeURIComponent(id)}`);
+  if (!row) return null;
+  const r = rowToReview(row);
   r.status = 'Audited';
   r.auditedBy = auditedBy || '';
   r.auditedAt = new Date().toISOString();
   r.auditNote = auditNote || '';
-  await write(list);
+  await dbUpsert('reviews', reviewToRow(r));
   return r;
 }

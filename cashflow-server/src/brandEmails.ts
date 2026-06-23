@@ -11,42 +11,23 @@
  * (future), audit trail.
  */
 
-import { fileStore as fs } from './kvStore.js';
-
-const FILE = '.brand-emails.json';
+import { dbSelect, dbUpsert, dbDelete } from './db.js';
 
 export type BrandEmails = Record<string, string>;
 
 let cache: BrandEmails | null = null;
+type Row = { brand: string; email: string };
 
 export async function loadBrandEmails(): Promise<BrandEmails> {
  if (cache) return cache;
- try {
- const raw = await fs.readFile(FILE, 'utf8');
- const parsed = JSON.parse(raw) as BrandEmails;
- // Clean junk values ("N/A", "DO NOT EMAIL …", malformed multi-emails, etc.)
- // before exposing the registry. Preserves the cleaned form back to disk so
- // the file stays tidy.
- const cleaned: BrandEmails = {};
- let needsRewrite = false;
- for (const [brand, raw] of Object.entries(parsed)) {
- const c = cleanEmail(raw);
- if (c) {
- cleaned[brand] = c;
- if (c !== raw) needsRewrite = true;
- } else {
- needsRewrite = true; // dropping this entry
+ const rows = await dbSelect<Row>('brand_emails');
+ const all: BrandEmails = {};
+ for (const r of rows) {
+ const c = cleanEmail(r.email);
+ if (c) all[r.brand] = c;
  }
- }
- cache = cleaned;
- if (needsRewrite) {
- await fs.writeFile(FILE, JSON.stringify(cleaned, null, 2), 'utf8').catch(() => {});
- }
+ cache = all;
  return cache;
- } catch {
- cache = {};
- return cache;
- }
 }
 
 export async function setBrandEmail(brand: string, email: string): Promise<BrandEmails> {
@@ -54,23 +35,27 @@ export async function setBrandEmail(brand: string, email: string): Promise<Brand
  const clean = email.trim();
  if (!clean) {
  delete all[brand];
+ await dbDelete('brand_emails', `brand=eq.${encodeURIComponent(brand)}`);
  } else {
  all[brand] = clean;
+ await dbUpsert('brand_emails', { brand, email: clean });
  }
  cache = { ...all };
- await fs.writeFile(FILE, JSON.stringify(cache, null, 2), 'utf8');
  return cache;
 }
 
 export async function setBrandEmailsBulk(updates: BrandEmails): Promise<BrandEmails> {
  const all = await loadBrandEmails();
+ const ups: Row[] = [];
+ const dels: string[] = [];
  for (const [brand, email] of Object.entries(updates)) {
  const clean = (email ?? '').trim();
- if (!clean) delete all[brand];
- else all[brand] = clean;
+ if (!clean) { delete all[brand]; dels.push(brand); }
+ else { all[brand] = clean; ups.push({ brand, email: clean }); }
  }
+ if (ups.length) await dbUpsert('brand_emails', ups);
+ for (const b of dels) await dbDelete('brand_emails', `brand=eq.${encodeURIComponent(b)}`);
  cache = { ...all };
- await fs.writeFile(FILE, JSON.stringify(cache, null, 2), 'utf8');
  return cache;
 }
 
@@ -100,19 +85,15 @@ function cleanEmail(raw: string | undefined): string {
  * manual edits. Junk values ("N/A", "DO NOT EMAIL", etc.) are filtered out. */
 export async function seedFromSheet(discovered: BrandEmails): Promise<BrandEmails> {
  const all = await loadBrandEmails();
- let changed = false;
+ const ups: Row[] = [];
  for (const [brand, email] of Object.entries(discovered)) {
  const clean = cleanEmail(email);
  if (!clean) continue;
  if (all[brand]) continue; // never overwrite an existing registry entry
  all[brand] = clean;
- changed = true;
+ ups.push({ brand, email: clean });
  }
- if (changed) {
- cache = { ...all };
- await fs.writeFile(FILE, JSON.stringify(cache, null, 2), 'utf8');
- } else {
- cache = all;
- }
+ if (ups.length) { await dbUpsert('brand_emails', ups); cache = { ...all }; }
+ else cache = all;
  return cache;
 }

@@ -26,9 +26,9 @@
  * so re-scrapes are essentially free.
  */
 
-import { fileStore as fs } from './kvStore.js';
+import { dbSelectOne, dbUpsert } from './db.js';
 
-const CACHE_FILE = '.invoice-scrape-cache.json';
+const SCRAPE_SOURCE = 'invoices';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36';
 
@@ -61,23 +61,23 @@ type CacheFile = {
 
 let cache: CacheFile | null = null;
 
+type ScrapeRow = { source: string; data: CacheFile };
+
 async function loadCache(): Promise<CacheFile> {
  if (cache) return cache;
  try {
-  const raw = await fs.readFile(CACHE_FILE, 'utf8');
-  cache = JSON.parse(raw) as CacheFile;
-  if (!cache.byToken) cache = { version: 1, byToken: {}, failures: {} };
-  if (!cache.failures) cache.failures = {};
-  return cache;
+  const row = await dbSelectOne<ScrapeRow>('scrape_cache', `source=eq.${SCRAPE_SOURCE}`);
+  const data = row?.data;
+  cache = data && data.byToken ? { version: 1, byToken: data.byToken, failures: data.failures ?? {} } : { version: 1, byToken: {}, failures: {} };
  } catch {
   cache = { version: 1, byToken: {}, failures: {} };
-  return cache;
  }
+ return cache;
 }
 
 async function saveCache(): Promise<void> {
  if (!cache) return;
- await fs.writeFile(CACHE_FILE, JSON.stringify(cache, null, 2), 'utf8');
+ await dbUpsert('scrape_cache', { source: SCRAPE_SOURCE, data: cache, updated_at: new Date().toISOString() });
 }
 
 export function invalidateScraperCache(): void { cache = null; }

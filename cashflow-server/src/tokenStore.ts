@@ -1,6 +1,6 @@
-import { readJson, writeJson } from './kvStore.js';
+import { dbSelectOne, dbUpsert, dbDelete } from './db.js';
 
-const TOKEN_KEY = '.tokens.json';
+type TokenRow = { realm_id: string; access_token: string; refresh_token: string; expires_at: number };
 
 export type StoredTokens = {
  accessToken: string;
@@ -31,7 +31,13 @@ function isValidTokenShape(t: unknown): t is StoredTokens {
 
 export async function loadTokens(): Promise<StoredTokens | null> {
  if (cache && Date.now() < cacheExpiresAt) return cache;
- const parsed = await readJson<unknown>(TOKEN_KEY, null);
+ const row = await dbSelectOne<TokenRow>('qb_tokens', 'order=updated_at.desc');
+ const parsed = row && {
+   accessToken: row.access_token,
+   refreshToken: row.refresh_token,
+   realmId: row.realm_id,
+   expiresAt: Number(row.expires_at),
+ };
  if (!isValidTokenShape(parsed)) {
    if (parsed) console.warn('[tokenStore] stored tokens are malformed - ignoring');
    cache = null;
@@ -49,14 +55,20 @@ export async function saveTokens(tokens: StoredTokens): Promise<void> {
  }
  cache = tokens;
  cacheExpiresAt = Date.now() + CACHE_TTL_MS;
- await writeJson(TOKEN_KEY, tokens);
+ await dbUpsert('qb_tokens', {
+   realm_id: tokens.realmId,
+   access_token: tokens.accessToken,
+   refresh_token: tokens.refreshToken,
+   expires_at: tokens.expiresAt,
+   updated_at: new Date().toISOString(),
+ });
  console.log(`[tokenStore] saved tokens (expiresAt=${new Date(tokens.expiresAt).toISOString()})`);
 }
 
 export async function clearTokens(): Promise<void> {
  cache = null;
  cacheExpiresAt = 0;
- await writeJson(TOKEN_KEY, null);
+ await dbDelete('qb_tokens', 'realm_id=not.is.null');
 }
 
 /** Force the next loadTokens() call to re-read from disk. Used by the OAuth

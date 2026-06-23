@@ -8,11 +8,8 @@
  * Storage: server/.assistant-history.json - durable, survives restarts.
  */
 
-import { fileStore as fs } from './kvStore.js';
+import { dbSelect, dbSelectOne, dbInsert } from './db.js';
 
-const FILE = '.assistant-history.json';
-
-const MAX_RECORDS = 400;
 const MIN_GAP_MS = 20 * 60 * 1000; // record at most once every 20 minutes
 
 export type HistoryMetrics = {
@@ -32,37 +29,43 @@ export type HistoryMetrics = {
 };
 export type HistoryRecord = { at: string; m: HistoryMetrics };
 
-let cache: HistoryRecord[] | null = null;
+type Row = {
+  at: string; bank_cash: number; opening_cash: number; cc_debt: number; net_cash: number;
+  gelato_net: number; gelato_received: number; lt_ar_projected: number; inflow_13w: number;
+  outflow_13w: number; closing_wk13: number; min_closing: number; runway_negative_week: number | null; qb_down: boolean;
+};
+function rowToRec(r: Row): HistoryRecord {
+  return { at: r.at, m: {
+    bankCash: Number(r.bank_cash), openingCash: Number(r.opening_cash), ccDebt: Number(r.cc_debt), netCash: Number(r.net_cash),
+    gelatoNet: Number(r.gelato_net), gelatoReceived: Number(r.gelato_received), ltArProjected: Number(r.lt_ar_projected),
+    inflow13w: Number(r.inflow_13w), outflow13w: Number(r.outflow_13w), closingWk13: Number(r.closing_wk13),
+    minClosing: Number(r.min_closing), runwayNegativeWeek: r.runway_negative_week == null ? null : Number(r.runway_negative_week),
+    qbDown: Boolean(r.qb_down),
+  } };
+}
+function metricsToRow(m: HistoryMetrics): Record<string, unknown> {
+  return {
+    at: new Date().toISOString(),
+    bank_cash: m.bankCash, opening_cash: m.openingCash, cc_debt: m.ccDebt, net_cash: m.netCash,
+    gelato_net: m.gelatoNet, gelato_received: m.gelatoReceived, lt_ar_projected: m.ltArProjected,
+    inflow_13w: m.inflow13w, outflow_13w: m.outflow13w, closing_wk13: m.closingWk13,
+    min_closing: m.minClosing, runway_negative_week: m.runwayNegativeWeek, qb_down: m.qbDown,
+  };
+}
 
 async function load(): Promise<HistoryRecord[]> {
-  if (cache) return cache;
-  try {
-    cache = JSON.parse(await fs.readFile(FILE, 'utf8')) as HistoryRecord[];
-  } catch {
-    cache = [];
-  }
-  return cache;
+  const rows = await dbSelect<Row>('bot_metric_history', 'order=at.asc&limit=3000');
+  return rows.map(rowToRec);
 }
 
-async function persist(recs: HistoryRecord[]): Promise<void> {
-  cache = recs.slice(-MAX_RECORDS);
-  await fs.writeFile(FILE, JSON.stringify(cache, null, 2), 'utf8');
-}
-
-/** Append a record, throttled so we don't bloat the file on every poll. */
+/** Append a record, throttled so we don't write on every poll. */
 export async function recordHistory(m: HistoryMetrics): Promise<void> {
-  const recs = await load();
-  const last = recs[recs.length - 1];
+  const lastRow = await dbSelectOne<Row>('bot_metric_history', 'order=at.desc');
+  const last = lastRow ? rowToRec(lastRow) : null;
   if (last && Date.now() - Date.parse(last.at) < MIN_GAP_MS) return;
-  // Skip a degraded record (QB down zeroes expenses) so it doesn't pollute diffs.
-  if (m.qbDown && (!last || !last.m.qbDown)) {
-    // record the status flip once, but keep prior money values for comparison
-    recs.push({ at: new Date().toISOString(), m: { ...last?.m, ...m, qbDown: true } as HistoryMetrics });
-    await persist(recs);
-    return;
-  }
-  recs.push({ at: new Date().toISOString(), m });
-  await persist(recs);
+  // QB down zeroes expenses; record the status flip once but keep prior money values for comparison.
+  const merged = (m.qbDown && (!last || !last.m.qbDown)) ? ({ ...last?.m, ...m, qbDown: true } as HistoryMetrics) : m;
+  await dbInsert('bot_metric_history', metricsToRow(merged));
 }
 
 export type Change = { label: string; before: number; after: number; delta: number; kind: 'cash' | 'ar' | 'flow' | 'status' };

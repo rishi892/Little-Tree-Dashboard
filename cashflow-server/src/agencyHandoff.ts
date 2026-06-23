@@ -4,9 +4,7 @@
  * sent. Stored in our own system (no external sheet).
  *   Storage: cashflow-server/.agency-handoffs.json   (keyed by invoice #)
  */
-import { fileStore as fs } from './kvStore.js';
-
-const FILE = '.agency-handoffs.json';
+import { dbSelect, dbUpsert, dbDelete } from './db.js';
 
 export type Handoff = {
   invNo: string;
@@ -19,22 +17,12 @@ export type Handoff = {
   handedAt: string;
 };
 
-let cache: Handoff[] | null = null;
-
-async function read(): Promise<Handoff[]> {
-  if (cache) return cache;
-  try { cache = JSON.parse(await fs.readFile(FILE, 'utf8')) as Handoff[]; }
-  catch { cache = []; }
-  return cache;
-}
-async function write(list: Handoff[]): Promise<void> {
-  cache = list;
-  await fs.writeFile(FILE, JSON.stringify(list, null, 2), 'utf8');
-}
+type Row = { inv_no: string; vendor: string; amount: number; days_overdue: number | null; agency: string; note: string; handed_by: string; handed_at: string };
+const toHandoff = (r: Row): Handoff => ({ invNo: r.inv_no, vendor: r.vendor, amount: Number(r.amount), daysOverdue: r.days_overdue == null ? null : Number(r.days_overdue), agency: r.agency, note: r.note, handedBy: r.handed_by, handedAt: r.handed_at });
 
 export async function loadHandoffs(): Promise<Handoff[]> {
-  const list = await read();
-  return [...list].sort((a, b) => (b.handedAt || '').localeCompare(a.handedAt || ''));
+  const rows = await dbSelect<Row>('agency_handoffs', 'order=handed_at.desc');
+  return rows.map(toHandoff);
 }
 
 export async function addHandoff(p: Record<string, unknown>): Promise<Handoff> {
@@ -50,17 +38,15 @@ export async function addHandoff(p: Record<string, unknown>): Promise<Handoff> {
     handedBy: String(p.handedBy || ''),
     handedAt: String(p.handedAt || new Date().toISOString()),
   };
-  const list = await read();
-  const i = list.findIndex((x) => x.invNo === invNo);
-  if (i >= 0) list[i] = handoff; else list.push(handoff); // upsert
-  await write(list);
+  await dbUpsert('agency_handoffs', {
+    inv_no: handoff.invNo, vendor: handoff.vendor, amount: handoff.amount, days_overdue: handoff.daysOverdue,
+    agency: handoff.agency, note: handoff.note, handed_by: handoff.handedBy, handed_at: handoff.handedAt,
+  });
   return handoff;
 }
 
 export async function removeHandoff(invNo: string): Promise<boolean> {
-  const list = await read();
-  const next = list.filter((x) => x.invNo !== String(invNo).trim());
-  if (next.length === list.length) return false;
-  await write(next);
+  const inv = String(invNo).trim();
+  await dbDelete('agency_handoffs', `inv_no=eq.${encodeURIComponent(inv)}`);
   return true;
 }

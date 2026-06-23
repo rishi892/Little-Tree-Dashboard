@@ -26,9 +26,7 @@
  * Storage: server/.weekly-snapshots.json - durable, survives restarts.
  */
 
-import { fileStore as fs } from './kvStore.js';
-
-const SNAPSHOTS_FILE = '.weekly-snapshots.json';
+import { dbSelect, dbSelectOne, dbUpsert, dbDelete } from './db.js';
 
 export type SnapshotLineItem = {
   label: string;
@@ -62,67 +60,63 @@ export type WeeklySnapshot = {
   salesForecast13wTotal: number;
 };
 
-export type SnapshotFile = {
-  version: 1;
-  snapshots: Record<string, WeeklySnapshot>;
+type Row = {
+  monday: string; captured_at: string; opening_cash: number;
+  total_inflow_wk1: number; total_outflow_wk1: number; net_change_wk1: number; closing_cash_wk1: number;
+  ar_projection_13w_total: number; sales_forecast_wk1: number; sales_forecast_13w_total: number;
+  inflows: SnapshotLineItem[]; outflows: SnapshotLineItem[];
 };
-
-let cache: SnapshotFile | null = null;
-
-async function loadFile(): Promise<SnapshotFile> {
-  if (cache) return cache;
-  try {
-    const raw = await fs.readFile(SNAPSHOTS_FILE, 'utf8');
-    const parsed = JSON.parse(raw) as SnapshotFile;
-    cache = parsed.snapshots ? parsed : { version: 1, snapshots: {} };
-    return cache;
-  } catch {
-    cache = { version: 1, snapshots: {} };
-    return cache;
-  }
+function toSnap(r: Row): WeeklySnapshot {
+  return {
+    monday: r.monday, capturedAt: r.captured_at, openingCash: Number(r.opening_cash),
+    inflows: r.inflows ?? [], outflows: r.outflows ?? [],
+    totalInflowWk1: Number(r.total_inflow_wk1), totalOutflowWk1: Number(r.total_outflow_wk1),
+    netChangeWk1: Number(r.net_change_wk1), closingCashWk1: Number(r.closing_cash_wk1),
+    arProjection13wTotal: Number(r.ar_projection_13w_total), salesForecastWk1: Number(r.sales_forecast_wk1),
+    salesForecast13wTotal: Number(r.sales_forecast_13w_total),
+  };
 }
-
-async function saveFile(file: SnapshotFile): Promise<void> {
-  cache = file;
-  await fs.writeFile(SNAPSHOTS_FILE, JSON.stringify(file, null, 2), 'utf8');
+function toRow(s: WeeklySnapshot): Record<string, unknown> {
+  return {
+    monday: s.monday, captured_at: s.capturedAt, opening_cash: s.openingCash,
+    total_inflow_wk1: s.totalInflowWk1, total_outflow_wk1: s.totalOutflowWk1,
+    net_change_wk1: s.netChangeWk1, closing_cash_wk1: s.closingCashWk1,
+    ar_projection_13w_total: s.arProjection13wTotal, sales_forecast_wk1: s.salesForecastWk1,
+    sales_forecast_13w_total: s.salesForecast13wTotal, inflows: s.inflows, outflows: s.outflows,
+  };
 }
 
 /** Return all snapshots, sorted by Monday descending (newest first). */
 export async function listSnapshots(): Promise<WeeklySnapshot[]> {
-  const file = await loadFile();
-  return Object.values(file.snapshots).sort((a, b) => b.monday.localeCompare(a.monday));
+  const rows = await dbSelect<Row>('weekly_snapshots', 'order=monday.desc');
+  return rows.map(toSnap);
 }
 
 export async function getSnapshot(monday: string): Promise<WeeklySnapshot | null> {
-  const file = await loadFile();
-  return file.snapshots[monday] ?? null;
+  const row = await dbSelectOne<Row>('weekly_snapshots', `monday=eq.${encodeURIComponent(monday)}`);
+  return row ? toSnap(row) : null;
 }
 
 /**
- * Persist a snapshot for the given Monday. Idempotent: if a snapshot exists
- * for this Monday, returns without overwriting (the original forecast is the
- * historical artifact we want to preserve). Force = true overrides.
+ * Persist a snapshot for the given Monday. Idempotent: if a snapshot exists for
+ * this Monday, returns without overwriting (the original forecast is the
+ * historical artifact). Force = true overrides.
  */
 export async function captureSnapshotIfNeeded(snap: WeeklySnapshot, opts: { force?: boolean } = {}): Promise<{ wrote: boolean; reason: string }> {
-  const file = await loadFile();
-  if (!opts.force && file.snapshots[snap.monday]) {
+  if (!opts.force && (await getSnapshot(snap.monday))) {
     return { wrote: false, reason: 'already captured for this Monday' };
   }
-  file.snapshots[snap.monday] = snap;
-  await saveFile(file);
+  await dbUpsert('weekly_snapshots', toRow(snap));
   return { wrote: true, reason: opts.force ? 'forced overwrite' : 'new snapshot' };
 }
 
 /** Manual delete - admin use. */
 export async function deleteSnapshot(monday: string): Promise<boolean> {
-  const file = await loadFile();
-  if (!file.snapshots[monday]) return false;
-  delete file.snapshots[monday];
-  await saveFile(file);
+  await dbDelete('weekly_snapshots', `monday=eq.${encodeURIComponent(monday)}`);
   return true;
 }
 
-/** Force cache refresh from disk (after external edits). */
+/** No-op now that snapshots live in Postgres (kept for caller compatibility). */
 export function invalidateSnapshotsCache(): void {
-  cache = null;
+  /* table-backed: every read hits the DB, nothing to invalidate */
 }
