@@ -25,7 +25,6 @@ import { getTillerBalances } from './tiller.js';
 import { getGelatoAr } from './gelatoAr.js';
 import { getArProjection, type ArProjectionResult } from './arProjection.js';
 import { getMappedExpenses } from './mappedExpenses.js';
-import { getCachedSubscriptionAudit, computeActiveSubscriptionsMonthly } from './audit.js';
 import { getCcPaymentSchedule, type CcScheduledPayment } from './ccSchedule.js';
 import { getSalesForecast, type SalesForecastResult } from './salesForecast.js';
 import { captureSnapshotIfNeeded, type WeeklySnapshot } from './weeklySnapshots.js';
@@ -397,25 +396,14 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  invMonthlyAvg += monthly;
  pushExploded(invItems);
  } else if (/software\s*&\s*subscriptions/i.test(cat)) {
- // Skip - replaced by active-subscription audit below (live list of
- // 38 active subs vs 8 dormant). Combined's regex-driven number is
- // less accurate than the alias-matched audit.
- continue;
+ // Software & Subscriptions comes from the SAME Combined expense source as
+ // every other category (per request) - not a separate subscription audit.
+ subsMonthlyAvg += monthly;
+ pushExploded(subsItems);
  } else {
  otherMonthlyAvg += monthly;
  otherItems.push({ label: cat, monthly });
  }
- }
- // Subscriptions: use ACTIVE subs only (QB activity in last 4 months).
- // Dormant subs (Headset, Limitless, CCA, Loom, etc.) are excluded - they
- // were likely cancelled even though they appear in the expected list.
- try {
- const audit = await getCachedSubscriptionAudit(16);
- const active = computeActiveSubscriptionsMonthly(audit, 4);
- subsMonthlyAvg = active.activeMonthlySum;
- subsItems = active.activeRows.map((r) => ({ label: r.expected.name, monthly: r.usedMonthly }));
- } catch (e) {
- warnings.push(`Subscription audit failed (${e instanceof Error ? e.message : '?'}) - subs = 0.`);
  }
  payrollByWeek = new Array(WEEKS).fill(payrollMonthlyAvg / 4.33);
  invByWeek = new Array(WEEKS).fill(invMonthlyAvg / 4.33);
