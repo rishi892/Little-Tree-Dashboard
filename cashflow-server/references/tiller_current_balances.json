@@ -1,0 +1,191 @@
+{
+  "extractedAt": "2026-05-12",
+  "latestDate": "2026-05-11",
+  "source": "Tiller Money Google Sheets export",
+  "notes": "Balances pulled from the Accounts summary tab (most recent 'Last Updated' values). Two CSB accounts appear with stale 10/15/2025 dates ('New Personal MM' $11,257.85 and 'New Regular Chk' $11,416.22) — these were superseded by new account IDs ('Personal MM' and 'Regular Chk'); they are listed under 'staleAccounts' and excluded from totals. Investment accounts ******01 / ******02 were last updated 3/26/2026.",
+  "cashAccounts": [
+    {
+      "name": "Personal MM",
+      "mask": "1787",
+      "balance": 10.53,
+      "type": "Money Market / Savings",
+      "institution": "Citizens State Bank (CSB)",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "Regular Chk",
+      "mask": "2229",
+      "balance": 159.94,
+      "type": "Checking",
+      "institution": "Citizens State Bank (CSB)",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "Business MM",
+      "mask": "0910",
+      "balance": 55.37,
+      "type": "Money Market / Savings",
+      "institution": "Citizens State Bank (CSB)",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "CRB Indirect",
+      "mask": "7561",
+      "balance": 4739.19,
+      "type": "Checking (Business)",
+      "institution": "Citizens State Bank (CSB)",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "TOTAL CHECKING",
+      "mask": "8300",
+      "balance": 129.02,
+      "type": "Checking",
+      "institution": "Chase",
+      "lastUpdated": "2026-05-11"
+    }
+  ],
+  "creditCards": [
+    {
+      "name": "Amex EveryDay® Card",
+      "mask": "1006",
+      "balance": -15463.97,
+      "creditLimit": -13400.00,
+      "type": "Credit Card",
+      "institution": "American Express",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "Blue Business Plus Card",
+      "mask": "1009",
+      "balance": -31084.54,
+      "creditLimit": -9000.00,
+      "type": "Credit Card",
+      "institution": "American Express",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "Delta Gold Business Card",
+      "mask": "1007",
+      "balance": -3633.31,
+      "creditLimit": -6800.00,
+      "type": "Credit Card",
+      "institution": "American Express",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "Signature・6037",
+      "mask": "6037",
+      "balance": -17825.37,
+      "creditLimit": -12600.00,
+      "type": "Credit Card",
+      "institution": "Citi (per AutoCat / Insights mapping)",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "Citi Strata℠ Card",
+      "mask": null,
+      "balance": -678.59,
+      "creditLimit": -1000.00,
+      "type": "Credit Card",
+      "institution": "Citi",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "Citi Double Cash® Card",
+      "mask": null,
+      "balance": -4506.87,
+      "creditLimit": -5500.00,
+      "type": "Credit Card",
+      "institution": "Citi",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "CREDIT CARD (Chase -4158)",
+      "mask": "4158",
+      "balance": -26321.35,
+      "creditLimit": -24000.00,
+      "type": "Credit Card",
+      "institution": "Chase",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "CREDIT CARD (Chase -0715)",
+      "mask": "0715",
+      "balance": -3273.62,
+      "creditLimit": -3200.00,
+      "type": "Credit Card",
+      "institution": "Chase",
+      "lastUpdated": "2026-05-11"
+    }
+  ],
+  "other": [
+    {
+      "name": "MC Consumer",
+      "mask": "4362",
+      "balance": -23762.97,
+      "type": "Loan / Line of Credit",
+      "institution": "Unknown (labeled 'loan' in Tiller)",
+      "lastUpdated": "2026-05-11"
+    },
+    {
+      "name": "Investment Account ******01",
+      "mask": "01",
+      "balance": 10865.09,
+      "type": "Investment",
+      "institution": "Unknown brokerage",
+      "lastUpdated": "2026-03-26"
+    },
+    {
+      "name": "Investment Account ******02",
+      "mask": "02",
+      "balance": 10880.75,
+      "type": "Investment",
+      "institution": "Unknown brokerage",
+      "lastUpdated": "2026-03-26"
+    }
+  ],
+  "staleAccounts": [
+    {
+      "name": "New Personal MM",
+      "mask": "1787 (legacy ID)",
+      "balance": 11257.85,
+      "type": "Savings",
+      "institution": "Citizens State Bank (CSB) - legacy",
+      "lastUpdated": "2025-10-15",
+      "note": "Superseded by 'Personal MM' under a new account ID; do not include in active totals."
+    },
+    {
+      "name": "New Regular Chk",
+      "mask": "2229 (legacy ID)",
+      "balance": 11416.22,
+      "type": "Checking",
+      "institution": "Citizens State Bank (CSB) - legacy",
+      "lastUpdated": "2025-10-15",
+      "note": "Superseded by 'Regular Chk' under a new account ID; do not include in active totals."
+    }
+  ],
+  "totals": {
+    "cash": 5094.05,
+    "creditCardDebt": -102787.62,
+    "loans": -23762.97,
+    "investments": 21745.84,
+    "netWorthFromTiller": -99710.70
+  },
+  "workbookTabsFound": [
+    "Balance History (historical daily 2025-09-16 to 2026-04-21 with AccountId/AccountType)",
+    "Balance History (snapshot single-date 2026-04-24, no AccountId)",
+    "Balance History (historical 2026-04-21 secondary, with new account IDs)",
+    "Transactions (Tiller standard schema: Date/Description/Category/Amount/Account/Account#/Institution/Month/Week/Transaction ID/Account ID/...)",
+    "Transactions (legacy format with Amount/Business/Category/TransactionID/Account/Status)",
+    "Categories",
+    "AutoCat",
+    "Insights / Spending Trends (Spent Yesterday, Ungrouped Asset, Ungrouped Liability)",
+    "Income & Expenses Breakdown",
+    "Card Name / Utilization",
+    "Annual Dashboard",
+    "Accounts (canonical current-balance summary with Last Updated)",
+    "Accounts (detailed with AccountId/Type/Balance/Limit/UsePct/Currency/Category)",
+    "UtilPct summary"
+  ]
+}

@@ -1,0 +1,685 @@
+/**
+ * 13-Week Cash Flow - primary lender-facing artifact, rolling.
+ *
+ * Week 1 = the Monday of the current ISO week. Every Monday the schedule rolls
+ * forward by one week automatically.
+ *
+ * All values are live - no spreadsheet-hardcoded fallbacks. Where a source is
+ * missing, the row is 0 and the UI shows it as such.
+ *
+ * Live sources:
+ * - Opening Cash Wk1 ← Tiller cash accounts (Section 1 sum)
+ * - CC Payoff Wk1 ← Tiller credit-card balances (Section 2 sum)
+ * - AR Collections ← Gelato AR sheet (each Pending invoice placed in
+ * expected collection week = issue + 90 days)
+ * - Payroll (per week) ← QB expense detail · last 3-month avg of Payroll
+ * group ÷ 4.33
+ * - Subscriptions ← QB subscription audit · per-week projection
+ * - Other Expenses ← QB expense detail · all non-payroll non-inventory
+ * non-subscription categories · L3M avg ÷ 4.33
+ * - Inventory & RM ← QB expense detail · COGS / raw-material accounts
+ * · L3M avg ÷ 4.33
+ */
+
+import { getTillerBalances } from './tiller.js';
+import { getGelatoAr } from './gelatoAr.js';
+import { getArProjection, type ArProjectionResult } from './arProjection.js';
+import { getMappedExpenses } from './mappedExpenses.js';
+import { getCachedSubscriptionAudit, computeActiveSubscriptionsMonthly } from './audit.js';
+import { getCcPaymentSchedule, type CcScheduledPayment } from './ccSchedule.js';
+import { getSalesForecast, type SalesForecastResult } from './salesForecast.js';
+import { captureSnapshotIfNeeded, type WeeklySnapshot } from './weeklySnapshots.js';
+
+const WEEKS = 13;
+
+// Status thresholds
+const STATUS_CRITICAL = 10_000;
+const STATUS_TIGHT = 30_000;
+
+// --- Types ---
+
+export type CashflowWeek = { label: string; start: string; end: string };
+export type CashflowSource = 'live' | 'computed' | 'none';
+export type CashflowStatus = 'HEALTHY' | 'TIGHT' | 'CRITICAL';
+
+export type CashflowBreakdownItem = { label: string; amount: number; sub?: string };
+export type CashflowLine = {
+ label: string;
+ source: CashflowSource;
+ note?: string;
+ values: number[];
+ // What makes up this row - the underlying line items (categories, invoices,
+ // cards, subscriptions...) so the user can see exactly what's included.
+ breakdown?: CashflowBreakdownItem[];
+};
+
+export type CashflowResult = {
+ asOf: string;
+ anchor: string;
+ weeks: CashflowWeek[];
+ openingCashWk1: number;
+ openingCashSource: CashflowSource;
+ bankCashWk1: number;            // pure bank balance (opening minus the Due From PureX fold)
+ openingCashNote?: string;       // plain-English make-up of opening cash
+ openingCashBreakdown?: CashflowBreakdownItem[]; // overdue Gelato batches folded into opening
+ inflows: CashflowLine[];
+ outflows: CashflowLine[];
+ ccPayments: CcScheduledPayment[];
+ arProjection: ArProjectionResult | null;
+ salesForecast: SalesForecastResult | null;
+ totals: {
+ inflows: number[];
+ outflows: number[];
+ netChange: number[];
+ openingCash: number[];
+ closingCash: number[];
+ status: CashflowStatus[];
+ };
+ assumptions: {
+ ccPayoffWk1: number;
+ payrollPerWeek: number;
+ inventoryPerWeek: number;
+ otherPerWeek: number;
+ };
+ warnings: string[];
+};
+
+// --- Date helpers ---
+
+/** Today (UTC), 00:00. */
+function todayUtc(): Date {
+ const now = new Date();
+ return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+}
+
+/**
+ * Monday-on-or-before(today). Week 1 of the 13-week plan always starts on a
+ * Monday so each row covers a clean Mon-Sun calendar week. Today (May 14 Thu)
+ * → Mon May 11. Today (Mon) → same day.
+ */
+function mondayAnchor(from: Date = todayUtc()): Date {
+ // JS: Sun=0, Mon=1, ..., Sat=6. We want shift back to Monday.
+ const day = from.getUTCDay();
+ const shift = day === 0 ? 6 : day - 1; // Sunday → 6 days back, otherwise (day-1)
+ return addDays(from, -shift);
+}
+
+function addDays(d: Date, n: number): Date {
+ const r = new Date(d);
+ r.setUTCDate(d.getUTCDate() + n);
+ return r;
+}
+function ymd(d: Date): string {
+ return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+function fmtMMDD(d: Date): string {
+ return `${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+function daysInMonth(year: number, month: number): number {
+ return new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+}
+function buildWeeks(start: Date, count: number): CashflowWeek[] {
+ const w: CashflowWeek[] = [];
+ for (let i = 0; i < count; i++) {
+ const ws = addDays(start, i * 7);
+ const we = addDays(ws, 6);
+ w.push({ label: fmtMMDD(ws), start: ymd(ws), end: ymd(we) });
+ }
+ return w;
+}
+
+/** Place a date into one of the 13-week buckets; returns -1 if outside window. */
+function weekIndexFor(date: Date, weeks: CashflowWeek[]): number {
+ for (let i = 0; i < weeks.length; i++) {
+ const ws = new Date(weeks[i].start + 'T00:00:00Z');
+ const we = new Date(weeks[i].end + 'T23:59:59Z');
+ if (date >= ws && date <= we) return i;
+ }
+ return -1;
+}
+
+/** Spread a monthly amount on `billDay` of each month touched by the window. */
+function projectMonthly(billDay: number, monthly: number, weeks: CashflowWeek[]): number[] {
+ const out = new Array(weeks.length).fill(0);
+ if (monthly <= 0 || weeks.length === 0) return out;
+ const start = new Date(weeks[0].start + 'T00:00:00Z');
+ const end = new Date(weeks[weeks.length - 1].end + 'T23:59:59Z');
+ let curYear = start.getUTCFullYear();
+ let curMonth = start.getUTCMonth();
+ for (let i = 0; i < 6; i++) {
+ const day = Math.min(billDay, daysInMonth(curYear, curMonth));
+ const billDate = new Date(Date.UTC(curYear, curMonth, day));
+ if (billDate > end) break;
+ if (billDate >= start) {
+ const idx = weekIndexFor(billDate, weeks);
+ if (idx >= 0) out[idx] += monthly;
+ }
+ curMonth++;
+ if (curMonth > 11) { curMonth = 0; curYear++; }
+ }
+ return out;
+}
+
+function classifyStatus(closing: number): CashflowStatus {
+ if (closing < STATUS_CRITICAL) return 'CRITICAL';
+ if (closing < STATUS_TIGHT) return 'TIGHT';
+ return 'HEALTHY';
+}
+
+const MONTH_NAMES_FULL = ['january', 'february', 'march', 'april', 'may', 'june',
+ 'july', 'august', 'september', 'october', 'november', 'december'];
+
+function parseDateAny(s: string): Date | null {
+ const t = (s ?? '').trim();
+ if (!t) return null;
+ if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return new Date(t + 'T00:00:00Z');
+ const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+ if (m) {
+ const yr = m[3].length === 2 ? Number('20' + m[3]) : Number(m[3]);
+ return new Date(Date.UTC(yr, Number(m[1]) - 1, Number(m[2])));
+ }
+ // "Month YYYY" → use last day of that month as issue date (e.g. "January 2026"
+ // means the January 2026 batch invoice, billed end-of-month). Tolerates
+ // sheet typos like "Janurary" / "Feburary" by matching first 3 chars.
+ const mn = t.match(/^([A-Za-z]{3,})\s+(\d{4})$/);
+ if (mn) {
+ const prefix = mn[1].toLowerCase().substring(0, 3);
+ const monthIdx = MONTH_NAMES_FULL.findIndex((m) => m.startsWith(prefix));
+ if (monthIdx >= 0) {
+ const yr = Number(mn[2]);
+ const lastDay = new Date(Date.UTC(yr, monthIdx + 1, 0)).getUTCDate();
+ return new Date(Date.UTC(yr, monthIdx, lastDay));
+ }
+ }
+ return null;
+}
+
+// --- Main entry ---
+
+export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } = {}): Promise<CashflowResult> {
+ // Week 1 always starts on a Monday (Mon-Sun calendar weeks). For 'past'
+ // mode we anchor 13 weeks BEFORE the current Monday so the view covers
+ // weeks that have already closed.
+ const monday = mondayAnchor();
+ const ANCHOR = opts.direction === 'past' ? addDays(monday, -7 * WEEKS) : monday;
+ const weeks = buildWeeks(ANCHOR, WEEKS);
+ const warnings: string[] = [];
+
+ // 1. Opening cash + CC payoff - Tiller live.
+ // Business accounts only (match what Current Position counts):
+ // - CRB Indirect / 7561 (primary checking)
+ // - Business MM / 0910 (secondary MM)
+ // Personal accounts (Regular Chk, New Personal MM) excluded.
+ const BUSINESS_CASH_RE = /crb indirect|7561|business mm|0910/i;
+ let openingCashWk1 = 0;
+ let openingCashSource: CashflowSource = 'none';
+ let ccPayoff = 0;
+ try {
+ const tiller = await getTillerBalances();
+ openingCashWk1 = tiller.cashAccounts
+ .filter((a) => BUSINESS_CASH_RE.test(a.name))
+ .reduce((s, a) => s + a.balance, 0);
+ // CC payoff: include both creditCards bucket AND loans bucket (MC Consumer
+ // is categorised as a loan by Tiller but is functionally a CC).
+ ccPayoff = [...tiller.creditCards, ...tiller.loans].reduce((s, a) => s + Math.abs(a.balance), 0);
+ openingCashSource = 'live';
+ } catch (e) {
+ warnings.push(`Tiller fetch failed (${e instanceof Error ? e.message : '?'}) - opening cash and CC payoff = 0.`);
+ }
+
+ // 1b. CC Payment Schedule per week - replaces the legacy Wk 1 dump with a
+ // proper per-card schedule (each card paid at its monthly due date).
+ let ccByWeek: number[] = new Array(WEEKS).fill(0);
+ let ccPayments: CcScheduledPayment[] = [];
+ let ccScheduleSource: CashflowSource = 'none';
+ try {
+ const sch = await getCcPaymentSchedule(weeks);
+ ccByWeek = sch.byWeek;
+ ccPayments = sch.payments;
+ for (const w of sch.warnings) warnings.push(w);
+ if (ccPayments.length > 0) ccScheduleSource = 'live';
+ } catch (e) {
+ warnings.push(`CC schedule failed (${e instanceof Error ? e.message : '?'}).`);
+ }
+
+ // 1c. CC Utilisation removed - the 13-week plan no longer shows a CC-financing
+ // inflow line, and no longer auto-draws on the credit cards to cover weekly
+ // shortfalls. Closing cash now reflects the real (un-plugged) position.
+
+ // 2a. Gelato AR Collections per week - Net 97 terms (Net 90 + 7-day payment
+ // processing buffer). Each Gelato Pending invoice placed at issue + 97 days.
+ const gelatoArCollections: number[] = new Array(WEEKS).fill(0);
+ let gelatoArSource: CashflowSource = 'none';
+ // Overdue Gelato batches (past their Net-97 date) are money PureX already owes
+ // = the "Due From PureX (Gelato Net 90)" receivable. Per the user's model,
+ // OPENING CASH = "Total Cash on Hand" = bank + Due From PureX, so the overdue
+ // amount is folded into Wk1 opening cash instead of being collected again.
+ // Batches not yet due still show as collections in the week they land (e.g.
+ // the March batch in ~Wk3) so you can watch that money arrive.
+ let gelatoOverdueToOpening = 0;
+ const gelatoBreakdown: CashflowBreakdownItem[] = [];
+ const openingGelatoBreakdown: CashflowBreakdownItem[] = [];
+ try {
+ const gelato = await getGelatoAr();
+ for (const inv of gelato.pendingInvoices) {
+ // Only the amount STILL to collect counts: billed − whatever the Invoice
+ // Tracker shows already received. Fully-paid batch dropped; underpaid one
+ // contributes just its shortfall.
+ const received = inv.receivedAmount ?? 0;
+ const remaining = +Math.max(0, inv.amount - received).toFixed(2);
+ if (remaining <= 0.5) continue;
+ const issue = parseDateAny(inv.period) ?? parseDateAny(inv.comment);
+ const expected = issue ? addDays(issue, 97) : ANCHOR; // Net 97
+ const idx = weekIndexFor(expected, weeks);
+ const idParts = [inv.invoiceNumber, inv.period].filter(Boolean).join(' · ');
+ const bdItem: CashflowBreakdownItem = {
+ label: inv.description || inv.invoiceNumber || inv.period,
+ amount: remaining,
+ sub: received > 0
+ ? `${idParts} · billed $${Math.round(inv.amount).toLocaleString()}, received $${Math.round(received).toLocaleString()}`
+ : idParts,
+ };
+ if (expected < ANCHOR) {
+ // Already owed (past Net 97) → part of Total Cash on Hand → opening cash.
+ gelatoOverdueToOpening += remaining;
+ openingGelatoBreakdown.push(bdItem);
+ } else if (idx >= 0) {
+ gelatoArCollections[idx] += remaining;
+ gelatoBreakdown.push(bdItem);
+ }
+ }
+ if (gelato.pendingInvoices.length > 0) gelatoArSource = 'live';
+ } catch (e) {
+ warnings.push(`Gelato AR fetch failed (${e instanceof Error ? e.message : '?'}) - Gelato AR = 0.`);
+ }
+
+ // Opening cash = Total Cash on Hand = bank cash + overdue Gelato (Due From PureX).
+ // bankCashWk1 keeps the pure bank balance for callers that want just liquid cash.
+ const bankCashWk1 = openingCashWk1;
+ openingCashWk1 = +(openingCashWk1 + gelatoOverdueToOpening).toFixed(2);
+ const openingCashNote = gelatoOverdueToOpening > 0
+ ? `Total Cash on Hand: bank $${Math.round(bankCashWk1).toLocaleString()} + Due From PureX (overdue Gelato already owed) $${Math.round(gelatoOverdueToOpening).toLocaleString()}`
+ : `Bank cash $${Math.round(bankCashWk1).toLocaleString()}`;
+
+ // 2b. Real AR projection (replaces blanket Net 30) - uses per-customer
+ // collection-day patterns from paid history + future sales run-rate.
+ let arProjection: ArProjectionResult | null = null;
+ const nonGelatoArCollections: number[] = new Array(WEEKS).fill(0);
+ let nonGelatoArSource: CashflowSource = 'none';
+ try {
+ arProjection = await getArProjection(weeks);
+ for (let i = 0; i < WEEKS; i++) nonGelatoArCollections[i] = arProjection.arByWeek[i];
+ for (const w of arProjection.warnings) warnings.push(w);
+ if (arProjection.arByWeek.some((v) => v > 0)) nonGelatoArSource = 'live';
+ } catch (e) {
+ warnings.push(`AR projection failed (${e instanceof Error ? e.message : '?'}) - non-Gelato AR = 0.`);
+ }
+
+ // 2c. Forward-looking sales forecast (non-Gelato) - covers FUTURE invoices
+ // that don't exist yet. Linear-trend per brand over 6m lookback, distributed
+ // to weeks via brand-specific collection lag curve. Only meaningful for the
+ // 'future' direction view; on 'past' we skip (those weeks are settled).
+ // Pulled in future direction only. The forecast is NOT shown as an inflow
+ // row in the 13-Week table - it has its own dedicated Sales Forecast tab.
+ // We still compute it here so the snapshot capture records what we
+ // projected at the same Monday (used by the Past Weeks variance view).
+ let salesForecast: SalesForecastResult | null = null;
+ if (opts.direction !== 'past') {
+ try {
+ salesForecast = await getSalesForecast(weeks);
+ for (const w of salesForecast.warnings) warnings.push(w);
+ } catch (e) {
+ warnings.push(`Sales forecast failed (${e instanceof Error ? e.message : '?'}).`);
+ }
+ }
+
+ // Combined AR collections (kept for legacy callers; UI shows the split rows
+ // below as separate inflow lines).
+ const arCollections: number[] = weeks.map((_, i) => gelatoArCollections[i] + nonGelatoArCollections[i]);
+ const arSource: CashflowSource =
+ gelatoArSource === 'live' || nonGelatoArSource === 'live' ? 'live' : 'none';
+ void arCollections; void arSource;
+
+ // 3. (Subscription projection removed - Software & Subscriptions now flows
+ // through the unified Combined-view formula below, same as every other
+ // expense category.)
+
+ // 4. Single-source expense projection - pull every row from Mapped
+ // Expenses Combined view, calc monthly_avg = total / non-zero-months,
+ // weekly = monthly_avg / 4.33, then flat-distribute across all 13 weeks.
+ // This way the projection numbers match exactly what the Combined view
+ // shows on the Expenses tab. Single formula for all expense categories.
+ let payrollByWeek: number[] = new Array(WEEKS).fill(0);
+ let invByWeek: number[] = new Array(WEEKS).fill(0);
+ let subsByWeek: number[] = new Array(WEEKS).fill(0);
+ let otherByWeek: number[] = new Array(WEEKS).fill(0);
+ let payrollMonthlyAvg = 0;
+ let invMonthlyAvg = 0;
+ let subsMonthlyAvg = 0;
+ let otherMonthlyAvg = 0;
+ let payrollSource: CashflowSource = 'none';
+ let opexSource: CashflowSource = 'none';
+ // EVERYTHING (Payroll, Inventory, Subscriptions, Other) comes from the
+ // Combined view - that's the single source of truth the user sees on the
+ // Expenses tab. No more separate getInventoryPurchases() trace; whatever
+ // Combined shows IS the cashflow input.
+ const payrollItems: { label: string; monthly: number }[] = [];
+ const invItems: { label: string; monthly: number }[] = [];
+ const otherItems: { label: string; monthly: number }[] = [];
+ let subsItems: { label: string; monthly: number }[] = [];
+ try {
+ const combined = await getMappedExpenses('Combined');
+ function weeklyOf(values: number[]): number {
+ const total = values.reduce((s, v) => s + v, 0);
+ const nonZeroMonths = values.filter((v) => v > 0).length;
+ return nonZeroMonths > 0 ? total / nonZeroMonths : 0;
+ }
+ for (const r of combined.rows ?? []) {
+ const monthly = weeklyOf(r.values ?? []);
+ if (monthly === 0) continue;
+ const cat = r.category;
+ // Split a category's monthly figure across the QB accounts that fed it
+ // (e.g. each payroll payee: execs, contractors, the payroll-sheet bulk),
+ // proportional to each account's share - so the breakdown shows WHO/WHAT.
+ const rowTotal = (r.values ?? []).reduce((s, v) => s + v, 0) || 1;
+ const srcs = (r.qbSources ?? []).filter((s) => s.total > 0);
+ const pushExploded = (target: { label: string; monthly: number }[]) => {
+ if (srcs.length > 0) {
+ for (const s of srcs) target.push({ label: s.name, monthly: monthly * (s.total / rowTotal) });
+ } else {
+ target.push({ label: cat, monthly });
+ }
+ };
+ if (r.group === 'Payroll') {
+ payrollMonthlyAvg += monthly;
+ pushExploded(payrollItems);
+ } else if (/^inventory\s*&\s*raw materials$/i.test(cat)) {
+ invMonthlyAvg += monthly;
+ pushExploded(invItems);
+ } else if (/software\s*&\s*subscriptions/i.test(cat)) {
+ // Skip - replaced by active-subscription audit below (live list of
+ // 38 active subs vs 8 dormant). Combined's regex-driven number is
+ // less accurate than the alias-matched audit.
+ continue;
+ } else {
+ otherMonthlyAvg += monthly;
+ otherItems.push({ label: cat, monthly });
+ }
+ }
+ // Subscriptions: use ACTIVE subs only (QB activity in last 4 months).
+ // Dormant subs (Headset, Limitless, CCA, Loom, etc.) are excluded - they
+ // were likely cancelled even though they appear in the expected list.
+ try {
+ const audit = await getCachedSubscriptionAudit(16);
+ const active = computeActiveSubscriptionsMonthly(audit, 4);
+ subsMonthlyAvg = active.activeMonthlySum;
+ subsItems = active.activeRows.map((r) => ({ label: r.expected.name, monthly: r.usedMonthly }));
+ } catch (e) {
+ warnings.push(`Subscription audit failed (${e instanceof Error ? e.message : '?'}) - subs = 0.`);
+ }
+ payrollByWeek = new Array(WEEKS).fill(payrollMonthlyAvg / 4.33);
+ invByWeek = new Array(WEEKS).fill(invMonthlyAvg / 4.33);
+ subsByWeek = new Array(WEEKS).fill(subsMonthlyAvg / 4.33);
+ otherByWeek = new Array(WEEKS).fill(otherMonthlyAvg / 4.33);
+ } catch (e) {
+ warnings.push(`Combined-view expense fetch failed (${e instanceof Error ? e.message : '?'}) - all expense rows = 0.`);
+ }
+
+ if (payrollMonthlyAvg > 0) payrollSource = 'live';
+ if (invMonthlyAvg > 0 || otherMonthlyAvg > 0 || subsMonthlyAvg > 0) opexSource = 'live';
+
+ // Surface monthly run-rates in the legacy `assumptions` block for the UI.
+ const payrollWeekly = payrollMonthlyAvg / 4.33;
+ const invWeekly = invMonthlyAvg / 4.33;
+ const otherWeekly = otherMonthlyAvg / 4.33;
+
+ // Sales projection row - sums all 3 buckets (wholesale + private label +
+ // gelato new-invoice projections). Placed RIGHT BELOW "Non-Gelato AR
+ // Collections" so the user can compare: existing open invoices vs new
+ // invoices that haven't been booked yet. No double-count with the Gelato
+ // AR Collections row above - that row is PENDING invoices (already issued,
+ // Net 97 collection), this row is NEW invoices not yet issued.
+ const bWholesale    = salesForecast?.buckets.wholesale.weeklyInflow    ?? new Array(WEEKS).fill(0);
+ const bPrivateLabel = salesForecast?.buckets.privateLabel.weeklyInflow ?? new Array(WEEKS).fill(0);
+ const bGelato       = salesForecast?.buckets.gelato.weeklyInflow       ?? new Array(WEEKS).fill(0);
+ const projectedSalesWeekly = new Array(WEEKS).fill(0).map((_, i) =>
+  +((bWholesale[i] ?? 0) + (bPrivateLabel[i] ?? 0) + (bGelato[i] ?? 0)).toFixed(2),
+ );
+ const projectedSalesSource: CashflowSource = projectedSalesWeekly.some((v) => v > 0)
+ ? 'computed'
+ : 'none';
+ const projectedSalesNote = salesForecast
+ ? `Combined: Little Tree $${Math.round(salesForecast.buckets.wholesale.scenarioTotals.base.cash).toLocaleString()} + private label $${Math.round(salesForecast.buckets.privateLabel.scenarioTotals.base.cash).toLocaleString()} + gelato $${Math.round(salesForecast.buckets.gelato.scenarioTotals.base.cash).toLocaleString()} = $${Math.round(projectedSalesWeekly.reduce((s,v)=>s+v,0)).toLocaleString()} 13-wk cash`
+ : 'Forecast unavailable';
+
+ // --- Breakdowns: the underlying line items behind each row (for the click
+ // modal so the user can see exactly what's included). Expense breakdowns use
+ // weekly amounts (monthly ÷ 4.33) so they sum to the row's per-week value.
+ const toExpBd = (items: { label: string; monthly: number }[]): CashflowBreakdownItem[] =>
+ items
+ .filter((it) => it.monthly > 0)
+ .sort((a, b) => b.monthly - a.monthly)
+ .map((it) => ({ label: it.label, amount: +(it.monthly / 4.33).toFixed(2), sub: `≈ $${Math.round(it.monthly).toLocaleString()}/mo` }));
+ const invBreakdown = toExpBd(invItems);
+ const payrollBreakdown = toExpBd(payrollItems);
+ const subsBreakdown = toExpBd(subsItems);
+ const otherBreakdown = toExpBd(otherItems);
+
+ // Credit-card payments grouped by card (only those due within the 13 weeks).
+ const ccByCard = new Map<string, { amount: number; count: number }>();
+ for (const pmt of ccPayments) {
+ const idx = weekIndexFor(new Date(pmt.dueDate + 'T00:00:00Z'), weeks);
+ if (idx < 0) continue;
+ const cur = ccByCard.get(pmt.cardLabel) ?? { amount: 0, count: 0 };
+ cur.amount += pmt.amount; cur.count++;
+ ccByCard.set(pmt.cardLabel, cur);
+ }
+ const ccBreakdown: CashflowBreakdownItem[] = [...ccByCard.entries()]
+ .sort((a, b) => b[1].amount - a[1].amount)
+ .map(([card, v]) => ({ label: card, amount: +v.amount.toFixed(2), sub: `${v.count} payment${v.count > 1 ? 's' : ''} due in window` }));
+
+ // (gelatoBreakdown is built above, where the gelato result is in scope.)
+
+ // Projected new sales - the 3 forecast buckets.
+ const projBreakdown: CashflowBreakdownItem[] = salesForecast ? [
+ { label: 'Little Tree (new invoices)', amount: +salesForecast.buckets.wholesale.scenarioTotals.base.cash.toFixed(2), sub: '13-wk cash · base case' },
+ { label: 'Private Label (new invoices)', amount: +salesForecast.buckets.privateLabel.scenarioTotals.base.cash.toFixed(2), sub: '13-wk cash · base case' },
+ { label: 'Gelato (new invoices)', amount: +salesForecast.buckets.gelato.scenarioTotals.base.cash.toFixed(2), sub: '13-wk cash · base case' },
+ ] : [];
+
+ // Little Tree AR - top customers by open balance behind the projection.
+ const ltByCust = new Map<string, number>();
+ if (arProjection) {
+ for (const pl of arProjection.placements) {
+ ltByCust.set(pl.customer, (ltByCust.get(pl.customer) ?? 0) + (pl.openBalance ?? 0));
+ }
+ }
+ const ltBreakdown: CashflowBreakdownItem[] = [...ltByCust.entries()]
+ .sort((a, b) => b[1] - a[1])
+ .slice(0, 30)
+ .map(([cust, amt]) => ({ label: cust, amount: +amt.toFixed(2), sub: 'open balance' }));
+
+ // 5. Assemble lines.
+ const inflows: CashflowLine[] = [
+ {
+ label: 'Gelato AR Collections (Net 97)',
+ source: gelatoArSource,
+ note: 'Pending Gelato batches placed at issue + 97 days (Net 90 + 7-day buffer)',
+ values: gelatoArCollections,
+ breakdown: gelatoBreakdown,
+ },
+ {
+ label: 'Little Tree AR Collections (lag-curve)',
+ source: nonGelatoArSource,
+ note: arProjection
+ ? `Open invoices placed at each customer's typical pay-day (median±σ from paid history) · collectibility haircut applied - ${(arProjection.projectedCollectibilityRate * 100).toFixed(0)}% of open AR booked as cash (older/at-risk invoices discounted)`
+ : 'Per-channel collection curve from Invoice Tracker',
+ values: nonGelatoArCollections,
+ breakdown: ltBreakdown,
+ },
+ {
+ label: 'Projected AR from new sales (3-bucket)',
+ source: projectedSalesSource,
+ note: projectedSalesNote,
+ values: projectedSalesWeekly,
+ breakdown: projBreakdown,
+ },
+ ];
+
+ const outflows: CashflowLine[] = [
+ {
+ label: 'Inventory & Raw Materials',
+ source: opexSource,
+ note: invMonthlyAvg > 0
+ ? `Monthly avg $${Math.round(invMonthlyAvg).toLocaleString()} ÷ 4.33 = $${Math.round(invMonthlyAvg / 4.33).toLocaleString()}/wk`
+ : 'No inventory data',
+ values: invByWeek,
+ breakdown: invBreakdown,
+ },
+ {
+ label: 'Payroll',
+ source: payrollSource,
+ note: payrollMonthlyAvg > 0
+ ? `Monthly avg $${Math.round(payrollMonthlyAvg).toLocaleString()} ÷ 4.33 = $${Math.round(payrollMonthlyAvg / 4.33).toLocaleString()}/wk`
+ : 'No payroll data',
+ values: payrollByWeek,
+ breakdown: payrollBreakdown,
+ },
+ {
+ label: 'Software & Subscriptions',
+ source: opexSource,
+ note: subsMonthlyAvg > 0
+ ? `Monthly avg $${Math.round(subsMonthlyAvg).toLocaleString()} ÷ 4.33 = $${Math.round(subsMonthlyAvg / 4.33).toLocaleString()}/wk`
+ : 'No subscriptions data',
+ values: subsByWeek,
+ breakdown: subsBreakdown,
+ },
+ {
+ label: 'Other Expenses',
+ source: opexSource,
+ note: otherMonthlyAvg > 0
+ ? `Monthly avg $${Math.round(otherMonthlyAvg).toLocaleString()} ÷ 4.33 = $${Math.round(otherMonthlyAvg / 4.33).toLocaleString()}/wk · sum of all other Non-Payroll categories`
+ : 'No other-expense data',
+ values: otherByWeek,
+ breakdown: otherBreakdown,
+ },
+ {
+ label: `Credit Card Payments`,
+ source: ccScheduleSource,
+ note: ccPayments.length > 0
+ ? `Per-card schedule · ${ccPayments.length} payments across ${ccByWeek.filter((v) => v > 0).length} weeks · total $${Math.round(ccByWeek.reduce((s, v) => s + v, 0)).toLocaleString()}`
+ : `No CC schedule (Tiller CC total: $${Math.round(ccPayoff).toLocaleString()})`,
+ values: ccByWeek,
+ breakdown: ccBreakdown,
+ },
+ ];
+
+ // 6. Totals + closing.
+ const sum = (cols: number[][], wIdx: number) => cols.reduce((s, c) => s + (c[wIdx] ?? 0), 0);
+
+ // (Auto CC-utilisation shortfall engine removed - no CC draws/repayments are
+ // synthesised; closing cash below reflects the real position.)
+
+ const totalInflows = weeks.map((_, i) => sum(inflows.map((l) => l.values), i));
+ const totalOutflows = weeks.map((_, i) => sum(outflows.map((l) => l.values), i));
+ const netChange = weeks.map((_, i) => totalInflows[i] - totalOutflows[i]);
+
+ const openingCash: number[] = [];
+ const closingCash: number[] = [];
+ let prevClosing = openingCashWk1;
+ for (let i = 0; i < WEEKS; i++) {
+ openingCash.push(prevClosing);
+ const closing = prevClosing + netChange[i];
+ closingCash.push(closing);
+ prevClosing = closing;
+ }
+ const status = closingCash.map(classifyStatus);
+
+ // Lazy snapshot capture (actual view, future direction only): record this
+ // Monday's plan so the Past Weeks view can later compute variance vs
+ // actuals. Idempotent per Monday - second call same day is a no-op.
+ if (opts.direction !== 'past') {
+ try {
+ const snap: WeeklySnapshot = {
+ monday: ymd(ANCHOR),
+ capturedAt: new Date().toISOString(),
+ openingCash: openingCashWk1,
+ inflows: inflows.map((l) => ({
+ label: l.label,
+ wk1Value: l.values[0] ?? 0,
+ total13w: l.values.reduce((s, v) => s + v, 0),
+ })),
+ outflows: outflows.map((l) => ({
+ label: l.label,
+ wk1Value: l.values[0] ?? 0,
+ total13w: l.values.reduce((s, v) => s + v, 0),
+ })),
+ totalInflowWk1: totalInflows[0] ?? 0,
+ totalOutflowWk1: totalOutflows[0] ?? 0,
+ netChangeWk1: netChange[0] ?? 0,
+ closingCashWk1: closingCash[0] ?? 0,
+ arProjection13wTotal: arProjection?.arByWeek.reduce((s, v) => s + v, 0) ?? 0,
+ salesForecastWk1: salesForecast?.weeklyInflow[0] ?? 0,
+ salesForecast13wTotal: salesForecast?.totalProjectedCash ?? 0,
+ };
+ await captureSnapshotIfNeeded(snap);
+ } catch (e) {
+ warnings.push(`Snapshot capture failed (${e instanceof Error ? e.message : '?'}).`);
+ }
+ }
+
+ // For 'past' direction, reverse the WEEK ORDER so the most-recent closed
+ // week appears as Wk 1 (left-most) rather than the 13-weeks-ago week. User
+ // mental model for Past Weeks is "starting from now, look back" not
+ // "starting 13 weeks ago, march forward". Internal computations (snapshots,
+ // AR placement etc.) all ran chronologically above; only the output arrays
+ // get reversed here at the API boundary so the UI shows most-recent-first.
+ const reverseForPast = opts.direction === 'past';
+ const rev = <T,>(arr: T[]): T[] => reverseForPast ? [...arr].reverse() : arr;
+ const outWeeks = rev(weeks);
+ const outInflows: CashflowLine[] = inflows.map((l) => ({ ...l, values: rev(l.values) }));
+ const outOutflows: CashflowLine[] = outflows.map((l) => ({ ...l, values: rev(l.values) }));
+ const outArProjection = arProjection && reverseForPast
+   ? { ...arProjection, arByWeek: [...arProjection.arByWeek].reverse() }
+   : arProjection;
+ const outSalesForecast = salesForecast && reverseForPast
+   ? {
+       ...salesForecast,
+       weeklyInflow:    [...salesForecast.weeklyInflow].reverse(),
+       weeklyInflowV2:  [...salesForecast.weeklyInflowV2].reverse(),
+       weeklyInflowBest:  [...salesForecast.weeklyInflowBest].reverse(),
+       weeklyInflowWorst: [...salesForecast.weeklyInflowWorst].reverse(),
+     }
+   : salesForecast;
+
+ return {
+ asOf: new Date().toISOString(),
+ anchor: ymd(ANCHOR),
+ weeks: outWeeks,
+ openingCashWk1,
+ openingCashSource,
+ bankCashWk1,
+ openingCashNote,
+ openingCashBreakdown: openingGelatoBreakdown,
+ inflows: outInflows,
+ outflows: outOutflows,
+ ccPayments,
+ arProjection: outArProjection,
+ salesForecast: outSalesForecast,
+ totals: {
+ inflows: rev(totalInflows),
+ outflows: rev(totalOutflows),
+ netChange: rev(netChange),
+ openingCash: rev(openingCash),
+ closingCash: rev(closingCash),
+ status: rev(status),
+ },
+ assumptions: {
+ ccPayoffWk1: ccPayoff,
+ payrollPerWeek: payrollWeekly,
+ inventoryPerWeek: invWeekly,
+ otherPerWeek: otherWeekly,
+ },
+ warnings,
+ };
+}

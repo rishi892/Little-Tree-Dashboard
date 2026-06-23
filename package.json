@@ -1,0 +1,29 @@
+{
+  "name": "ar-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "build:all": "vite build && npm --prefix cashflow-server run build",
+    "install:all": "npm install && npm --prefix cashflow-server install",
+    "start": "node cashflow-server/dist/index.js"
+  },
+  "dependencies": {
+    "leaflet": "^1.9.4",
+    "papaparse": "^5.4.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-leaflet": "^4.2.1",
+    "recharts": "^2.12.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^6.0.3",
+    "vite": "^5.4.2"
+  }
+}

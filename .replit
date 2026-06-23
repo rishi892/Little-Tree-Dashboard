@@ -1,0 +1,23 @@
+# Replit entry config. Single Node process serves the AR Dashboard +
+# Cashflow Dashboard frontends plus the Cashflow API on one port.
+
+run        = "npm start"
+entrypoint = "cashflow-server/src/index.ts"
+
+modules = ["nodejs-20"]
+
+[nix]
+channel = "stable-23_11"
+
+[deployment]
+deploymentTarget = "cloudrun"
+# Build the frontend bundles + compile the server, then start it.
+build = ["sh", "-c", "npm run install:all && npm run build:all"]
+run   = ["sh", "-c", "npm start"]
+
+[env]
+NODE_ENV = "production"
+
+[[ports]]
+localPort    = 4747
+externalPort = 80

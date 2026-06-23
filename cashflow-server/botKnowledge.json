@@ -1,0 +1,2145 @@
+[
+ {
+  "id": "cash_on_hand_total",
+  "label": "Cash on hand (total) / Total cash on hand (incl. Due From PureX)",
+  "aliases": [
+   "total cash",
+   "cash balance",
+   "how much cash do we have",
+   "kitna cash hai",
+   "total paisa",
+   "bank me kitna hai",
+   "available cash",
+   "cash on hand",
+   "total bank balance",
+   "live cash"
+  ],
+  "definition": "The combined money in all real operating bank accounts right now, summed across every non-intercompany business bank account. In the live CurrentPosition view it is the sum of the mapped Tiller cash accounts (Checking 7561 + BMM 0910) PLUS Due From PureX (Gelato Net 90), which the user counts as cash.",
+  "source": "currentPosition.ts cash.total: all QB AccountType 'Bank' accounts minus intercompany pattern, sum CurrentBalance. Sheet fallback 7,755.34 + 55.37 = 7,810.71. linkedAccounts.ts parallel tiller.cashTotal. CurrentPosition.tsx line 128-129: cashTotalLive = sum(cashRows tiller.balance) + dueFromPurex.balance.",
+  "formula": "All QB 'Bank' accounts minus names containing purex/intercompany/clearing/due to/from; sum CurrentBalance. Fallback 7,810.71. Live: cashTotalLive = sum(cashRows tiller.balance) + dueFromPurex.balance.",
+  "dependsOn": [
+   "primary_operating_account_7561",
+   "bmm_money_market_account",
+   "qb_bank_account_filter",
+   "cash_total_source",
+   "tiller_cash_total",
+   "due_from_purex"
+  ],
+  "affects": [
+   "net_working_capital",
+   "net_cash_after_card_debt",
+   "opening_cash_wk1"
+  ],
+  "snapshotField": "cash.total"
+ },
+ {
+  "id": "opening_cash_wk1",
+  "label": "Week 1 Opening Cash",
+  "aliases": [
+   "opening cash",
+   "starting cash",
+   "week 1 cash",
+   "wk1 opening",
+   "shuruaati cash",
+   "kitna cash shuru mein",
+   "opening balance",
+   "bank balance start"
+  ],
+  "definition": "The cash you start Week 1 with - the real money in the business bank accounts on the Monday the plan begins.",
+  "source": "cashflow13.ts: pulled live from Tiller (getTillerBalances), summing only BUSINESS cash accounts matching /crb indirect|7561|business mm|0910/i. Personal accounts excluded. If Tiller fails, falls back to 0, warning pushed, openingCashSource='none'.",
+  "formula": "Sum of balances of Tiller cash accounts matching CRB Indirect, 7561, Business MM, or 0910. Nothing else added.",
+  "dependsOn": [
+   "tiller_cash_total",
+   "primary_operating_account_7561",
+   "bmm_money_market_account"
+  ],
+  "affects": [
+   "opening_cash_per_week",
+   "closing_cash_per_week",
+   "min_closing_cash",
+   "status_per_week_backend",
+   "critical_weeks",
+   "runway_first_critical_week",
+   "adjusted_closing_cash"
+  ],
+  "snapshotField": "openingCashWk1"
+ },
+ {
+  "id": "opening_cash_source",
+  "label": "Opening Cash Source",
+  "aliases": [
+   "opening cash source",
+   "is opening cash live",
+   "data source for opening cash",
+   "live ya nahi"
+  ],
+  "definition": "A tag saying whether the opening cash number is a live feed ('Live'), computed ('Calc'), or missing ('-').",
+  "source": "cashflow13.ts: openingCashSource set to 'live' after a successful Tiller fetch, else 'none'. UI (srcLabel/srcTone) renders live->Live, computed->Calc, none->'-'.",
+  "formula": "If Tiller balance fetch succeeded then 'live', else 'none'.",
+  "dependsOn": [
+   "opening_cash_wk1"
+  ],
+  "affects": [
+   "warnings"
+  ],
+  "snapshotField": "openingCashSource"
+ },
+ {
+  "id": "inflow_gelato_ar_net97",
+  "label": "Gelato AR Collections (Net 97)",
+  "aliases": [
+   "gelato ar",
+   "gelato collections",
+   "gelato ka paisa",
+   "net 97 gelato",
+   "gelato batches collection",
+   "gelato invoice cash"
+  ],
+  "definition": "Money expected from already-issued (pending) Gelato batch invoices, slotted into the week it should be collected (issue date + 97 days).",
+  "source": "cashflow13.ts section 2a: getGelatoAr() pending invoices, remaining = max(0, amount - receivedAmount); skip if <= 0.5. Expected date = issue + 97 days; placed in matching week; past-due -> Week 1.",
+  "formula": "For each pending Gelato invoice: remaining = max(0, billed - received). Place in week containing (issue + 97 days). Past-due -> Week 1. Sum per week.",
+  "dependsOn": [
+   "gelato_net_to_collect",
+   "gelato_ar_weekly_collections_net97",
+   "week_buckets"
+  ],
+  "affects": [
+   "total_inflows_per_week",
+   "net_change_per_week",
+   "closing_cash_per_week",
+   "min_closing_cash",
+   "peak_inflow",
+   "kpi_13_week_net"
+  ],
+  "snapshotField": "inflows[label=Gelato AR Collections (Net 97)].values"
+ },
+ {
+  "id": "inflow_little_tree_ar_lagcurve",
+  "label": "Little Tree AR Collections (lag-curve)",
+  "aliases": [
+   "little tree ar",
+   "non-gelato ar",
+   "lt collections",
+   "open invoices cash",
+   "little tree ka paisa",
+   "ar projection",
+   "lag curve collections"
+  ],
+  "definition": "Expected weekly collections from open non-Gelato (Little Tree) invoices, spread by each customer's typical pay timing, after a collectibility haircut.",
+  "source": "cashflow13.ts section 2b: getArProjection(weeks).arByWeek copied into nonGelatoArCollections. Source 'live' if any week > 0.",
+  "formula": "Take getArProjection().arByWeek directly. Each open invoice lands in its customer's expected pay week, discounted by the collectibility rate.",
+  "dependsOn": [
+   "ar_by_week",
+   "projected_collectibility_rate",
+   "week_buckets"
+  ],
+  "affects": [
+   "total_inflows_per_week",
+   "net_change_per_week",
+   "closing_cash_per_week",
+   "min_closing_cash",
+   "peak_inflow",
+   "kpi_13_week_net"
+  ],
+  "snapshotField": "inflows[label=Little Tree AR Collections (lag-curve)].values"
+ },
+ {
+  "id": "inflow_projected_sales_3bucket",
+  "label": "Projected AR from new sales (3-bucket)",
+  "aliases": [
+   "projected sales",
+   "new sales cash",
+   "sales forecast inflow",
+   "future invoices cash",
+   "naya sales paisa",
+   "3 bucket sales"
+  ],
+  "definition": "Cash from brand-new sales not yet invoiced, across three buckets (Little Tree/wholesale, Private Label, Gelato).",
+  "source": "cashflow13.ts: projectedSalesWeekly[i] = wholesale.weeklyInflow[i] + privateLabel.weeklyInflow[i] + gelato.weeklyInflow[i] (2dp). Only in 'future' direction. Source 'computed' if any week > 0. No double-count with AR rows. UI honors the scenario toggle (best/worst swap).",
+  "formula": "For each week: wholesale + private label + gelato weekly inflow from the sales forecast. Scenario toggle swaps to weeklyInflowBest (+18%) or weeklyInflowWorst (-18%).",
+  "dependsOn": [
+   "weekly_inflow_v2",
+   "bucket_wholesale",
+   "bucket_private_label",
+   "bucket_gelato",
+   "sales_scenario_toggle",
+   "week_buckets"
+  ],
+  "affects": [
+   "total_inflows_per_week",
+   "adjusted_inflow_totals",
+   "net_change_per_week",
+   "closing_cash_per_week",
+   "min_closing_cash",
+   "peak_inflow",
+   "kpi_13_week_net"
+  ],
+  "snapshotField": "inflows[label=Projected AR from new sales (3-bucket)].values"
+ },
+ {
+  "id": "outflow_inventory_raw_materials",
+  "label": "Inventory & Raw Materials (outflow)",
+  "aliases": [
+   "inventory spend",
+   "raw materials cost",
+   "cogs outflow",
+   "inventory ka kharcha",
+   "rm weekly"
+  ],
+  "definition": "Weekly spend on inventory and raw materials (the 13-week outflow row equivalent of inventory_per_week).",
+  "source": "cashflow13.ts section 4: from getMappedExpenses('Combined'), the inventory row; invMonthlyAvg = weeklyOf(values); invByWeek = invMonthlyAvg / 4.33 flat.",
+  "formula": "Inventory monthly average / 4.33, same flat amount each of 13 weeks.",
+  "dependsOn": [
+   "inventory_per_week",
+   "combined_expense_view",
+   "constant_4_33"
+  ],
+  "affects": [
+   "total_outflows_per_week",
+   "adjusted_outflow_totals",
+   "net_change_per_week",
+   "closing_cash_per_week",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": "outflows[label=Inventory & Raw Materials].values"
+ },
+ {
+  "id": "outflow_payroll",
+  "label": "Payroll (outflow)",
+  "aliases": [
+   "payroll",
+   "salaries",
+   "wages",
+   "payroll per week",
+   "salary kharcha",
+   "tankhwah",
+   "staff cost"
+  ],
+  "definition": "Weekly payroll outflow (salaries/wages) - the 13-week row equivalent of payroll_per_week.",
+  "source": "cashflow13.ts section 4: every Combined row group==='Payroll'; payrollMonthlyAvg summed; payrollByWeek = payrollMonthlyAvg / 4.33 flat. Breakdown explodes per QB payee.",
+  "formula": "Payroll-group monthly average / 4.33, same flat amount each of 13 weeks.",
+  "dependsOn": [
+   "payroll_per_week",
+   "payroll_monthly_avg",
+   "constant_4_33"
+  ],
+  "affects": [
+   "total_outflows_per_week",
+   "adjusted_outflow_totals",
+   "net_change_per_week",
+   "closing_cash_per_week",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": "outflows[label=Payroll].values"
+ },
+ {
+  "id": "outflow_software_subscriptions",
+  "label": "Software & Subscriptions (outflow)",
+  "aliases": [
+   "subscriptions",
+   "software cost",
+   "saas spend",
+   "subscription kharcha",
+   "active subs"
+  ],
+  "definition": "Weekly software and subscription spend (active recurring charges only) - the 13-week row equivalent of subs_per_week.",
+  "source": "cashflow13.ts section 4: Combined 'Software & Subscriptions' deliberately skipped; subsMonthlyAvg from getCachedSubscriptionAudit(16) -> computeActiveSubscriptionsMonthly(audit, 4).activeMonthlySum; subsByWeek = subsMonthlyAvg / 4.33 flat.",
+  "formula": "Active-subscription monthly sum / 4.33, same flat amount each of 13 weeks.",
+  "dependsOn": [
+   "subs_per_week",
+   "active_subscriptions_monthly_sum",
+   "constant_4_33"
+  ],
+  "affects": [
+   "total_outflows_per_week",
+   "adjusted_outflow_totals",
+   "net_change_per_week",
+   "closing_cash_per_week",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": "outflows[label=Software & Subscriptions].values"
+ },
+ {
+  "id": "outflow_other_expenses",
+  "label": "Other Expenses (outflow)",
+  "aliases": [
+   "other expenses",
+   "opex",
+   "operating expenses",
+   "baaki kharcha",
+   "misc expenses",
+   "other per week",
+   "overheads"
+  ],
+  "definition": "All other weekly operating spend - everything that isn't payroll, inventory, or subscriptions. The 13-week row equivalent of other_per_week.",
+  "source": "cashflow13.ts section 4: any Combined row not Payroll, not Inventory, not Subscriptions; otherMonthlyAvg summed; otherByWeek = otherMonthlyAvg / 4.33 flat.",
+  "formula": "Sum of every remaining category's monthly average / 4.33, same flat amount each of 13 weeks.",
+  "dependsOn": [
+   "other_per_week",
+   "other_monthly_avg",
+   "constant_4_33"
+  ],
+  "affects": [
+   "total_outflows_per_week",
+   "adjusted_outflow_totals",
+   "net_change_per_week",
+   "closing_cash_per_week",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": "outflows[label=Other Expenses].values"
+ },
+ {
+  "id": "outflow_credit_card_payments",
+  "label": "Credit Card Payments (outflow)",
+  "aliases": [
+   "cc payments",
+   "credit card bills",
+   "card payments",
+   "credit card ka payment",
+   "cc schedule outflow",
+   "card dues"
+  ],
+  "definition": "Scheduled credit-card bill payments, placed in the week each card's payment falls due. Unlike other outflows this varies week to week and is zero in weeks with no due date.",
+  "source": "cashflow13.ts section 1b: getCcPaymentSchedule(weeks).byWeek (ccByWeek). Source 'live' if any payments exist. Distinct from the legacy Wk1 CC payoff dump; the plan no longer auto-draws CC to plug shortfalls.",
+  "formula": "For each scheduled card payment, place its amount in the week containing its due date. Sum per week.",
+  "dependsOn": [
+   "cc_payment_week_bucket",
+   "cc_scheduled_payment_amount",
+   "week_buckets"
+  ],
+  "affects": [
+   "total_outflows_per_week",
+   "adjusted_outflow_totals",
+   "net_change_per_week",
+   "closing_cash_per_week",
+   "cc_breakdown"
+  ],
+  "snapshotField": "outflows[label=Credit Card Payments].values"
+ },
+ {
+  "id": "cc_breakdown",
+  "label": "Credit Card Payments - per-card breakdown",
+  "aliases": [
+   "cc by card",
+   "which cards",
+   "card payment breakdown",
+   "kaunse card",
+   "credit card drilldown",
+   "cc card list"
+  ],
+  "definition": "The list of credit cards with payments due in the 13-week window, each showing total dollars due in-window and how many payments fall in the window.",
+  "source": "In cashflow13.ts (447-457): ccByCard groups ccPayments by cardLabel, only payments whose dueDate falls inside the 13 weeks (weekIndexFor >= 0), summing amount and counting. ccBreakdown sorted desc, sub 'N payment(s) due in window'.",
+  "formula": "For each card: in-window total = sum of scheduled payments whose due date lands within the window; count = number. Sorted largest first.",
+  "dependsOn": [
+   "cc_payment_week_bucket",
+   "cc_scheduled_payment_amount"
+  ],
+  "affects": [
+   "outflow_credit_card_payments"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "cc_payoff_total",
+  "label": "CC Payoff total (Tiller card balances, Wk1 assumption)",
+  "aliases": [
+   "credit card balance",
+   "cc payoff",
+   "total card debt",
+   "card balance total",
+   "credit card bakaya",
+   "cc total owed",
+   "card payoff amount"
+  ],
+  "definition": "The total outstanding credit-card balance from Tiller as of Week 1 (incl. the MC Consumer loan treated as a card). The full amount owed, not a weekly payment - informational, shown in assumptions and used as a fallback note. Does NOT directly drive the weekly Credit Card Payments outflow.",
+  "source": "cashflow13.ts (214-225): ccPayoff = sum of abs(balance) across [...tiller.creditCards,...tiller.loans]. Returned as assumptions.ccPayoffWk1. Used in the CC outflow note only when no schedule exists.",
+  "formula": "ccPayoff = sum over [Tiller creditCards + Tiller loans] of abs(balance). A balance snapshot, not a cashflow amount.",
+  "dependsOn": [
+   "tiller_balance_raw",
+   "business_credit_card_debt_total"
+  ],
+  "affects": [
+   "outflow_credit_card_payments"
+  ],
+  "snapshotField": "assumptions.ccPayoffWk1"
+ },
+ {
+  "id": "total_inflows_per_week",
+  "label": "Total Inflows (per week, backend)",
+  "aliases": [
+   "total inflows",
+   "weekly inflows",
+   "total cash in",
+   "kul inflow",
+   "total paisa aaya",
+   "inflow total"
+  ],
+  "definition": "All cash coming in during a week - the sum of every inflow row for that week (base case).",
+  "source": "cashflow13.ts: totalInflows[i] = sum over inflow lines of line.values[i]. Exposed as totals.inflows. UI may override with adjustedInflowTotals when a scenario is active.",
+  "formula": "For each week add Gelato AR + Little Tree AR + Projected new sales.",
+  "dependsOn": [
+   "inflow_gelato_ar_net97",
+   "inflow_little_tree_ar_lagcurve",
+   "inflow_projected_sales_3bucket"
+  ],
+  "affects": [
+   "net_change_per_week",
+   "closing_cash_per_week",
+   "adjusted_inflow_totals",
+   "peak_inflow",
+   "kpi_13_week_net"
+  ],
+  "snapshotField": "totals.inflows"
+ },
+ {
+  "id": "adjusted_inflow_totals",
+  "label": "Adjusted Total Inflows (scenario-aware, UI)",
+  "aliases": [
+   "adjusted inflows",
+   "scenario inflows",
+   "best case inflows",
+   "worst case inflows",
+   "scenario ke baad inflow"
+  ],
+  "definition": "Total inflows per week after applying the active sales scenario (worst/base/best) - the number the dashboard shows and feeds downstream.",
+  "source": "CashFlow13Week.tsx: adjustedInflowTotals[i] = totals.inflows[i] - baseProjectedSalesRow[i] + scenarioRow[i] (weeklyInflowBest or weeklyInflowWorst). On 'base' equals totals.inflows[i]. Now drives EVERY downstream number.",
+  "formula": "Base total inflows minus base projected-sales row plus scenario projected-sales row (best +18%, worst -18%). On base equals plain total inflows.",
+  "dependsOn": [
+   "total_inflows_per_week",
+   "inflow_projected_sales_3bucket",
+   "sales_scenario_toggle",
+   "weekly_inflow_best",
+   "weekly_inflow_worst"
+  ],
+  "affects": [
+   "adjusted_net_change",
+   "adjusted_closing_cash",
+   "min_closing_cash",
+   "adjusted_status",
+   "critical_weeks",
+   "peak_inflow",
+   "kpi_13_week_net",
+   "adjusted_inflow_total_13w"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "total_outflows_per_week",
+  "label": "Total Outflows (per week)",
+  "aliases": [
+   "total expenses per week",
+   "weekly outflows",
+   "total cash out",
+   "kul kharcha",
+   "total paisa gaya",
+   "outflow total",
+   "weekly burn"
+  ],
+  "definition": "All cash going out during a week - the sum of every outflow row: Inventory + Payroll + Subscriptions + Other Expenses + Credit Card Payments.",
+  "source": "cashflow13.ts (562): totalOutflows = weeks.map((_,i)=>sum(outflows.map(l=>l.values), i)). Exposed as totals.outflows. UI recomputes adjustedOutflowTotals with per-cell what-if overrides.",
+  "formula": "For each week i: inventory[i] + payroll[i] + subscriptions[i] + other[i] + creditCardPayments[i]. First four flat; only CC varies by week.",
+  "dependsOn": [
+   "inventory_per_week",
+   "payroll_per_week",
+   "subs_per_week",
+   "other_per_week",
+   "outflow_credit_card_payments"
+  ],
+  "affects": [
+   "net_change_per_week",
+   "closing_cash_per_week",
+   "adjusted_outflow_totals",
+   "snapshot_outflow_wk1"
+  ],
+  "snapshotField": "totals.outflows"
+ },
+ {
+  "id": "adjusted_outflow_totals",
+  "label": "Adjusted Total Outflows (what-if aware, UI)",
+  "aliases": [
+   "adjusted outflows",
+   "what-if outflows",
+   "override outflows",
+   "edited kharcha",
+   "scenario outflows"
+  ],
+  "definition": "Total outflows per week after applying any what-if per-cell edits the CFO made - the number the dashboard shows and feeds closing cash.",
+  "source": "CashFlow13Week.tsx: adjustedOutflowTotals[i] = sum over outflow lines of effectiveOutflow(label, value, i), using cellOverrides[${label}|${weekIdx}] if set, else live. Overrides in localStorage ('cf13-cell-overrides'), applicable to one week or pushed forward.",
+  "formula": "For each week add each outflow row using the overridden value where edited, otherwise live.",
+  "dependsOn": [
+   "total_outflows_per_week",
+   "cell_overrides"
+  ],
+  "affects": [
+   "adjusted_net_change",
+   "adjusted_closing_cash",
+   "adjusted_week_burn",
+   "adjusted_status",
+   "min_closing_cash",
+   "critical_weeks",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "net_change_per_week",
+  "label": "Net Cash Change (per week, backend)",
+  "aliases": [
+   "net change",
+   "net cash change",
+   "net flow",
+   "weekly net",
+   "net paisa",
+   "inflow minus outflow",
+   "net cashflow"
+  ],
+  "definition": "How much the cash balance moves in a week - inflows minus outflows. Positive grows cash, negative shrinks it.",
+  "source": "cashflow13.ts (563): netChange[i] = totalInflows[i] - totalOutflows[i]. Exposed as totals.netChange.",
+  "formula": "Total inflows for the week minus total outflows for the week.",
+  "dependsOn": [
+   "total_inflows_per_week",
+   "total_outflows_per_week"
+  ],
+  "affects": [
+   "closing_cash_per_week",
+   "opening_cash_per_week",
+   "adjusted_net_change"
+  ],
+  "snapshotField": "totals.netChange"
+ },
+ {
+  "id": "adjusted_net_change",
+  "label": "Adjusted Net Cash Change (UI, scenario + overrides)",
+  "aliases": [
+   "adjusted net change",
+   "scenario net change",
+   "what-if net change",
+   "net change ke baad edit",
+   "effective net change"
+  ],
+  "definition": "Net cash change per week after the active scenario and what-if edits - scenario inflows minus override outflows.",
+  "source": "CashFlow13Week.tsx: adjustedNetChange[i] = adjustedInflowTotals[i] - adjustedOutflowTotals[i]. Drives the NET CASH CHANGE row and downstream closing cash.",
+  "formula": "Adjusted (scenario) total inflows minus adjusted (what-if) total outflows, per week.",
+  "dependsOn": [
+   "adjusted_inflow_totals",
+   "adjusted_outflow_totals"
+  ],
+  "affects": [
+   "adjusted_closing_cash",
+   "min_closing_cash",
+   "adjusted_status",
+   "critical_weeks",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "opening_cash_per_week",
+  "label": "Opening Cash (per week, roll-forward)",
+  "aliases": [
+   "weekly opening cash",
+   "opening per week",
+   "week start cash",
+   "har hafte ka opening",
+   "opening row"
+  ],
+  "definition": "The cash you start each week with. Week 1 uses the bank balance; every later week opens with the prior week's closing cash.",
+  "source": "cashflow13.ts: openingCash[i] = prevClosing, prevClosing starts at openingCashWk1 and updates to each week's closing. Exposed as totals.openingCash.",
+  "formula": "Week 1 opening = Week 1 opening cash. Each later week's opening = previous week's closing cash.",
+  "dependsOn": [
+   "opening_cash_wk1",
+   "closing_cash_per_week"
+  ],
+  "affects": [
+   "closing_cash_per_week"
+  ],
+  "snapshotField": "totals.openingCash"
+ },
+ {
+  "id": "closing_cash_per_week",
+  "label": "Closing Cash (per week, backend)",
+  "aliases": [
+   "closing cash",
+   "ending cash",
+   "week end cash",
+   "band hone ka cash",
+   "closing balance",
+   "cash at week end",
+   "running cash"
+  ],
+  "definition": "The cash you end each week with - the running bank balance after that week's net change. Each week opens with the prior week's closing.",
+  "source": "cashflow13.ts roll-forward: prevClosing starts at openingCashWk1; closing = prevClosing + netChange[i]; closingCash.push(closing); prevClosing = closing. Exposed as totals.closingCash. UI primarily shows adjustedClosingCash, but backend totals.closingCash is the base-case truth. No CC auto-draw/plug.",
+  "formula": "closingCash[i] = openingCash[i] + netChange[i]. Week 1 opening = bank balance; thereafter opening = prior closing. Any increase in payroll/inventory/subs/other/CC lowers closing cash from that week onward.",
+  "dependsOn": [
+   "opening_cash_wk1",
+   "net_change_per_week",
+   "opening_cash_per_week"
+  ],
+  "affects": [
+   "opening_cash_per_week",
+   "status_per_week_backend",
+   "min_closing_cash",
+   "critical_weeks",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": "totals.closingCash"
+ },
+ {
+  "id": "adjusted_closing_cash",
+  "label": "Adjusted Closing Cash (UI, scenario + overrides)",
+  "aliases": [
+   "adjusted closing cash",
+   "scenario closing cash",
+   "what-if closing cash",
+   "edit ke baad closing",
+   "effective closing cash",
+   "displayed closing cash"
+  ],
+  "definition": "The closing-cash line the dashboard actually displays - rolled forward using scenario-adjusted inflows and what-if-edited outflows.",
+  "source": "CashFlow13Week.tsx: running = openingCashWk1; running += adjustedNetChange[i]; adjustedClosingCash.push(running). Drives the CLOSING CASH row, STATUS pills, Min Closing Cash and KPIs. Yellow banner warns when overrides active.",
+  "formula": "Start at Week 1 opening cash. Each week add the adjusted net change (scenario inflows minus what-if outflows).",
+  "dependsOn": [
+   "opening_cash_wk1",
+   "adjusted_net_change"
+  ],
+  "affects": [
+   "min_closing_cash",
+   "min_closing_idx",
+   "adjusted_status",
+   "critical_weeks",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "status_per_week_backend",
+  "label": "Status per Week (backend classifyStatus)",
+  "aliases": [
+   "status",
+   "health status",
+   "week status",
+   "healthy tight critical",
+   "cash status",
+   "status kya hai"
+  ],
+  "definition": "A per-week health label - HEALTHY, TIGHT, or CRITICAL - based on closing cash, using fixed dollar thresholds.",
+  "source": "cashflow13.ts: status = closingCash.map(classifyStatus). classifyStatus: closing < 10000 -> CRITICAL; < 30000 -> TIGHT; else HEALTHY. Exposed as totals.status. UI overrides with burn-based adjustedStatus.",
+  "formula": "closing < $10,000 -> CRITICAL; < $30,000 -> TIGHT; else HEALTHY.",
+  "dependsOn": [
+   "closing_cash_per_week",
+   "status_threshold_critical_10000",
+   "status_threshold_tight_30000"
+  ],
+  "affects": [
+   "critical_weeks",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": "totals.status"
+ },
+ {
+  "id": "cash_status",
+  "label": "Weekly cash status (HEALTHY / TIGHT / CRITICAL)",
+  "aliases": [
+   "cash health",
+   "status color",
+   "weekly status",
+   "cash flag",
+   "healthy tight critical",
+   "cash warning",
+   "status kya hai"
+  ],
+  "definition": "A per-week classification of the closing cash position used to flag risk (backend fixed-threshold version): CRITICAL if closing < $10,000; TIGHT if < $30,000; else HEALTHY.",
+  "source": "cashflow13.ts classifyStatus(closing) with STATUS_CRITICAL=10000 and STATUS_TIGHT=30000. status = closingCash.map(classifyStatus). Higher outflows lower closing cash and can flip a week from HEALTHY to TIGHT or CRITICAL.",
+  "formula": "CRITICAL if closingCash < 10000; else TIGHT if < 30000; else HEALTHY.",
+  "dependsOn": [
+   "closing_cash_per_week"
+  ],
+  "affects": [],
+  "snapshotField": "totals.status"
+ },
+ {
+  "id": "adjusted_status",
+  "label": "Adjusted Status (UI, burn-based)",
+  "aliases": [
+   "adjusted status",
+   "displayed status",
+   "status pills",
+   "scenario status",
+   "burn based status"
+  ],
+  "definition": "The status label shown across the dashboard - HEALTHY/TIGHT/CRITICAL judged against the company's own weekly burn rate, on the scenario-and-override-adjusted closing cash.",
+  "source": "CashFlow13Week.tsx: adjustedStatus = adjustedClosingCash.map(c => c < adjustedWeekBurn ? 'CRITICAL' : c < adjustedWeekBurn*2 ? 'TIGHT' : 'HEALTHY'). Replaced fixed $10k/$30k thresholds so cutting an outflow relaxes the thresholds.",
+  "formula": "avg weekly burn = total adjusted outflows / 13. CRITICAL if adjusted closing cash < one week of burn; TIGHT if < two weeks; else HEALTHY.",
+  "dependsOn": [
+   "adjusted_closing_cash",
+   "adjusted_week_burn"
+  ],
+  "affects": [
+   "critical_weeks",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "adjusted_week_burn",
+  "label": "Adjusted Weekly Burn",
+  "aliases": [
+   "weekly burn",
+   "burn rate",
+   "average burn",
+   "hafte ka burn",
+   "weekly spend rate",
+   "burn"
+  ],
+  "definition": "The company's average cash burn in one week - the yardstick for the HEALTHY/TIGHT/CRITICAL status.",
+  "source": "CashFlow13Week.tsx: adjustedWeekBurn = (adjustedOutflowTotals.reduce(sum) || 0) / 13. Uses override-adjusted outflows so what-if edits change the burn.",
+  "formula": "Sum of all adjusted outflows across 13 weeks divided by 13.",
+  "dependsOn": [
+   "adjusted_outflow_totals"
+  ],
+  "affects": [
+   "adjusted_status",
+   "critical_weeks",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "min_closing_cash",
+  "label": "Min Closing Cash",
+  "aliases": [
+   "min closing cash",
+   "lowest cash",
+   "minimum balance",
+   "sabse kam cash",
+   "trough cash",
+   "worst week cash"
+  ],
+  "definition": "The lowest the closing cash gets across the 13 weeks - the trough of the cash curve.",
+  "source": "CashFlow13Week.tsx: minClosing = Math.min(...adjustedClosingCash); minClosingIdx = indexOf. Shown as the 'Min Closing Cash' KPI with its week label.",
+  "formula": "The smallest value in the adjusted closing-cash series, and the week it happens in.",
+  "dependsOn": [
+   "adjusted_closing_cash"
+  ],
+  "affects": [
+   "min_closing_idx"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "min_closing_idx",
+  "label": "Min Closing Week (index)",
+  "aliases": [
+   "min closing week",
+   "lowest cash week",
+   "trough week",
+   "sabse kam cash wala hafta",
+   "minimum cash week"
+  ],
+  "definition": "Which week the cash hits its lowest point.",
+  "source": "CashFlow13Week.tsx: minClosingIdx = adjustedClosingCash.indexOf(minClosing). Displayed as 'Wk {idx+1} \u00b7 {weeks[idx].label}'.",
+  "formula": "Position of the smallest adjusted closing-cash value; shown as week number (index + 1) and its date label.",
+  "dependsOn": [
+   "adjusted_closing_cash",
+   "min_closing_cash"
+  ],
+  "affects": [],
+  "snapshotField": ""
+ },
+ {
+  "id": "critical_weeks",
+  "label": "Critical Weeks (count)",
+  "aliases": [
+   "critical weeks",
+   "number of critical weeks",
+   "danger weeks",
+   "kitne critical hafte",
+   "critical count",
+   "weeks in danger"
+  ],
+  "definition": "How many of the 13 weeks end in CRITICAL status (closing cash below one week of burn).",
+  "source": "CashFlow13Week.tsx: criticalWeeks = adjustedStatus.filter(s => s === 'CRITICAL').length. Surfaced on the Min Closing Cash KPI sub-line.",
+  "formula": "Count the weeks whose adjusted status equals CRITICAL.",
+  "dependsOn": [
+   "adjusted_status"
+  ],
+  "affects": [
+   "runway_first_critical_week"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "runway_first_critical_week",
+  "label": "Runway (first negative / critical week)",
+  "aliases": [
+   "runway",
+   "cash runway",
+   "kab tak chalega cash",
+   "when does cash run out",
+   "first negative week",
+   "how long cash lasts",
+   "first critical week",
+   "cash kab khatam"
+  ],
+  "definition": "How far out the plan stays safe before cash first dips into trouble - the first week closing cash goes negative or hits CRITICAL status.",
+  "source": "Derived in CashFlow13Week.tsx from adjustedClosingCash and adjustedStatus. The first week where adjustedStatus === 'CRITICAL' marks the end of runway; closing cash rolls forward so this is the earliest point any upstream change pushes the rolling balance into the danger zone.",
+  "formula": "Walk weeks in order; runway ends at the first week whose adjusted closing cash falls below one week of burn (CRITICAL), i.e. first time the rolling balance drops into danger or below zero.",
+  "dependsOn": [
+   "adjusted_closing_cash",
+   "adjusted_status",
+   "adjusted_week_burn",
+   "opening_cash_wk1",
+   "adjusted_net_change"
+  ],
+  "affects": [],
+  "snapshotField": ""
+ },
+ {
+  "id": "sales_scenario_toggle",
+  "label": "Sales Scenario Toggle (worst/base/best)",
+  "aliases": [
+   "scenario toggle",
+   "best base worst",
+   "scenario button",
+   "worst case",
+   "best case",
+   "scenario badlo",
+   "sales scenario",
+   "stress test toggle"
+  ],
+  "definition": "A three-way switch (Worst / Base / Best) that flexes only the projected new-sales row up or down, then re-flows through closing cash, status, and KPIs.",
+  "source": "CashFlow13Week.tsx: salesScenario state (default 'base'). When non-base, Projected Sales row values swapped to weeklyInflowBest (~+18%) or weeklyInflowWorst (~-18%); adjustedInflowTotals applies the swap and propagates to net/closing/status/KPIs.",
+  "formula": "Base leaves projected sales as-is. Best replaces with best-case weekly inflow (~+18%). Worst with worst-case (~-18%). Everything downstream recomputes.",
+  "dependsOn": [
+   "weekly_inflow_best",
+   "weekly_inflow_worst",
+   "inflow_projected_sales_3bucket"
+  ],
+  "affects": [
+   "adjusted_inflow_totals",
+   "adjusted_net_change",
+   "adjusted_closing_cash",
+   "min_closing_cash",
+   "adjusted_status",
+   "critical_weeks",
+   "runway_first_critical_week",
+   "kpi_13_week_net",
+   "peak_inflow"
+  ],
+  "snapshotField": "salesForecast.weeklyInflowBest / salesForecast.weeklyInflowWorst"
+ },
+ {
+  "id": "cell_overrides",
+  "label": "What-if Cell Overrides",
+  "aliases": [
+   "what-if edits",
+   "cell overrides",
+   "manual edits",
+   "override",
+   "scenario edits",
+   "what if kharcha badlo",
+   "edit a cell",
+   "outflow override"
+  ],
+  "definition": "Manual per-cell edits the CFO can make to any outflow week, to test 'what if I cut/raise this' - layered on top of live data without changing the backend.",
+  "source": "CashFlow13Week.tsx: cellOverrides keyed ${label}|${weekIdx}, persisted to localStorage ('cf13-cell-overrides'). effectiveOutflow returns the override if present. applyOverride can set one week or push forward. EditOutflowModal allows weekly or monthly (\u00f74.33). Yellow banner when active; Reset clears.",
+  "formula": "For an edited outflow cell, use the entered amount instead of live (optionally all later weeks). Monthly entries divided by 4.33 for the per-week value.",
+  "dependsOn": [
+   "outflow_inventory_raw_materials",
+   "outflow_payroll",
+   "outflow_software_subscriptions",
+   "outflow_other_expenses",
+   "outflow_credit_card_payments",
+   "constant_4_33"
+  ],
+  "affects": [
+   "adjusted_outflow_totals",
+   "adjusted_week_burn",
+   "adjusted_net_change",
+   "adjusted_closing_cash",
+   "min_closing_cash",
+   "adjusted_status",
+   "critical_weeks",
+   "runway_first_critical_week"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "kpi_13_week_net",
+  "label": "13-Week Net (KPI)",
+  "aliases": [
+   "13 week net",
+   "net over 13 weeks",
+   "total net",
+   "kul net",
+   "inflows minus outflows total",
+   "quarter net"
+  ],
+  "definition": "The total cash gain or loss over the whole 13-week window - all inflows minus all outflows.",
+  "source": "CashFlow13Week.tsx: sum13InOut = adjustedInflowTotal13w - adjustedOutflowTotals.reduce(sum). Shown on the '13-Week Net' KPI card; sub-line shows total inflows and scenario. Scenario- and override-aware.",
+  "formula": "Sum of adjusted total inflows across 13 weeks minus sum of adjusted total outflows across 13 weeks.",
+  "dependsOn": [
+   "adjusted_inflow_total_13w",
+   "adjusted_outflow_totals"
+  ],
+  "affects": [],
+  "snapshotField": ""
+ },
+ {
+  "id": "adjusted_inflow_total_13w",
+  "label": "Total Inflows over 13 Weeks (KPI)",
+  "aliases": [
+   "total inflows 13 weeks",
+   "all inflows total",
+   "13 week inflows",
+   "kul inflow 13 hafte",
+   "total cash in over quarter"
+  ],
+  "definition": "All cash coming in across the entire 13-week window (scenario-adjusted).",
+  "source": "CashFlow13Week.tsx: adjustedInflowTotal13w = adjustedInflowTotals.reduce(sum). Shown in the 13-Week Net KPI sub-line and the TOTAL INFLOWS 13-wk total cell.",
+  "formula": "Add up the adjusted total inflows for all 13 weeks.",
+  "dependsOn": [
+   "adjusted_inflow_totals"
+  ],
+  "affects": [
+   "kpi_13_week_net"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "peak_inflow",
+  "label": "Peak Inflow (KPI)",
+  "aliases": [
+   "peak inflow",
+   "biggest inflow week",
+   "max inflow",
+   "sabse zyada inflow",
+   "highest collection week",
+   "best inflow week"
+  ],
+  "definition": "The single week with the most cash coming in, and how much.",
+  "source": "CashFlow13Week.tsx: peakInflowIdx = adjustedInflowTotals.indexOf(Math.max(...)). KPI shows Wk {idx+1} \u00b7 label and the amount, sub 'AR collections + projected sales'. Scenario-aware.",
+  "formula": "Find the week with the largest adjusted total inflows; report that week and amount.",
+  "dependsOn": [
+   "adjusted_inflow_totals"
+  ],
+  "affects": [],
+  "snapshotField": ""
+ },
+ {
+  "id": "assumption_payroll_per_week",
+  "label": "Payroll per Week (assumption)",
+  "aliases": [
+   "payroll per week",
+   "weekly payroll run rate",
+   "payroll run-rate",
+   "payroll weekly",
+   "salary per week"
+  ],
+  "definition": "The weekly payroll run-rate shown in the assumptions/run-rates panel.",
+  "source": "cashflow13.ts: payrollWeekly = payrollMonthlyAvg / 4.33, exposed as assumptions.payrollPerWeek. Same as the Payroll outflow row's per-week value.",
+  "formula": "Payroll monthly average / 4.33.",
+  "dependsOn": [
+   "payroll_per_week",
+   "constant_4_33"
+  ],
+  "affects": [],
+  "snapshotField": "assumptions.payrollPerWeek"
+ },
+ {
+  "id": "assumption_inventory_per_week",
+  "label": "Inventory & Raw Materials per Week (assumption)",
+  "aliases": [
+   "inventory per week",
+   "inventory run rate",
+   "raw materials weekly",
+   "rm per week"
+  ],
+  "definition": "The weekly inventory/raw-materials run-rate shown in the assumptions panel.",
+  "source": "cashflow13.ts: invWeekly = invMonthlyAvg / 4.33, exposed as assumptions.inventoryPerWeek. Same as the Inventory outflow row's per-week value.",
+  "formula": "Inventory monthly average / 4.33.",
+  "dependsOn": [
+   "inventory_per_week",
+   "constant_4_33"
+  ],
+  "affects": [],
+  "snapshotField": "assumptions.inventoryPerWeek"
+ },
+ {
+  "id": "assumption_other_per_week",
+  "label": "Other Operating Expenses per Week (assumption)",
+  "aliases": [
+   "other per week",
+   "other opex run rate",
+   "other expenses weekly",
+   "misc per week",
+   "overheads per week"
+  ],
+  "definition": "The weekly run-rate for all other operating expenses shown in the assumptions panel.",
+  "source": "cashflow13.ts: otherWeekly = otherMonthlyAvg / 4.33, exposed as assumptions.otherPerWeek. Same as the Other Expenses outflow row's per-week value.",
+  "formula": "Other-expenses monthly average / 4.33.",
+  "dependsOn": [
+   "other_per_week",
+   "constant_4_33"
+  ],
+  "affects": [],
+  "snapshotField": "assumptions.otherPerWeek"
+ },
+ {
+  "id": "week_buckets",
+  "label": "13 Week Buckets (Mon-Sun calendar weeks)",
+  "aliases": [
+   "weeks",
+   "13 weeks",
+   "week buckets",
+   "week calendar",
+   "13 hafte",
+   "weekly columns",
+   "anchor week"
+  ],
+  "definition": "The 13 weekly columns the plan is built on - each a clean Monday-to-Sunday calendar week, with Week 1 starting on the Monday of the current week and rolling forward.",
+  "source": "cashflow13.ts: WEEKS=13. mondayAnchor() = Monday on-or-before today (UTC). ANCHOR = that Monday for 'future', or 13 weeks earlier for 'past'. buildWeeks creates each week {label MM/DD, start, end}. weekIndexFor(date) places a date (-1 if outside). For 'past' arrays reversed.",
+  "formula": "Find the Monday on or before today; build 13 consecutive Mon-Sun weeks. Future starts at that Monday; past starts 13 weeks earlier and reverses display order.",
+  "dependsOn": [
+   "current_date",
+   "anchor_monday"
+  ],
+  "affects": [
+   "inflow_gelato_ar_net97",
+   "inflow_little_tree_ar_lagcurve",
+   "inflow_projected_sales_3bucket",
+   "outflow_credit_card_payments",
+   "cc_payment_week_bucket",
+   "ar_by_week",
+   "opening_cash_per_week",
+   "closing_cash_per_week"
+  ],
+  "snapshotField": "weeks"
+ },
+ {
+  "id": "anchor_monday",
+  "label": "Anchor Monday (Wk 1 start date)",
+  "aliases": [
+   "anchor",
+   "wk1 start",
+   "plan start date",
+   "anchor date",
+   "kab se shuru",
+   "week 1 monday"
+  ],
+  "definition": "The Monday that Week 1 starts on - the reference date the whole rolling plan is built from.",
+  "source": "cashflow13.ts: ANCHOR = mondayAnchor() for future, returned as anchor = ymd(ANCHOR). UI shows 'Wk 1 starts Mon {data.anchor}'.",
+  "formula": "The Monday on or before today (future mode); for past mode 13 weeks before that Monday.",
+  "dependsOn": [
+   "current_date"
+  ],
+  "affects": [
+   "week_buckets"
+  ],
+  "snapshotField": "anchor"
+ },
+ {
+  "id": "constant_4_33",
+  "label": "Weeks-per-Month Constant (4.33)",
+  "aliases": [
+   "4.33",
+   "weeks per month",
+   "monthly to weekly divisor",
+   "month se week",
+   "4.33 divisor"
+  ],
+  "definition": "The fixed number of weeks in an average month (4.33) used to convert any monthly figure into a per-week amount.",
+  "source": "cashflow13.ts divides every monthly expense average by 4.33 (payroll/inventory/subs/other). CashFlow13Week.tsx uses WEEKS_PER_MONTH = 4.33 in EditOutflowModal to convert monthly what-if entries to weekly.",
+  "formula": "Constant 4.33; weekly = monthly / 4.33 and monthly = weekly * 4.33.",
+  "dependsOn": [],
+  "affects": [
+   "payroll_per_week",
+   "inventory_per_week",
+   "subs_per_week",
+   "other_per_week",
+   "weekly_spread_formula",
+   "cell_overrides"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "status_threshold_critical_10000",
+  "label": "Backend CRITICAL threshold ($10,000)",
+  "aliases": [
+   "critical threshold",
+   "10000 threshold",
+   "critical limit",
+   "critical kab",
+   "10k cutoff"
+  ],
+  "definition": "The backend cutoff below which a week is flagged CRITICAL - closing cash under $10,000.",
+  "source": "cashflow13.ts: const STATUS_CRITICAL = 10_000; used in classifyStatus. UI uses a burn-based threshold instead.",
+  "formula": "Fixed $10,000 line; backend closing cash below it is CRITICAL.",
+  "dependsOn": [],
+  "affects": [
+   "status_per_week_backend",
+   "cash_status"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "status_threshold_tight_30000",
+  "label": "Backend TIGHT threshold ($30,000)",
+  "aliases": [
+   "tight threshold",
+   "30000 threshold",
+   "tight limit",
+   "tight kab",
+   "30k cutoff"
+  ],
+  "definition": "The backend cutoff below which a week is flagged TIGHT - closing cash under $30,000 (but at or above $10,000).",
+  "source": "cashflow13.ts: const STATUS_TIGHT = 30_000; used in classifyStatus. UI uses a burn-based threshold instead.",
+  "formula": "Fixed $30,000 line; backend closing cash below it (and >= $10,000) is TIGHT.",
+  "dependsOn": [],
+  "affects": [
+   "status_per_week_backend",
+   "cash_status"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "snapshot_outflow_wk1",
+  "label": "Weekly snapshot - outflow Wk1 and 13-week totals",
+  "aliases": [
+   "snapshot outflows",
+   "saved plan outflows",
+   "variance baseline outflows",
+   "past weeks outflow",
+   "snapshot expense record"
+  ],
+  "definition": "A saved record, captured each Monday, of every outflow row's Week-1 value and 13-week total, plus the total outflow for Week 1. Used later by the Past Weeks variance view.",
+  "source": "cashflow13.ts (579-603, future direction only): snap.outflows = outflows.map(l => ({label, wk1Value: l.values[0], total13w: sum(l.values)})); snap.totalOutflowWk1 = totalOutflows[0]. Saved via captureSnapshotIfNeeded (idempotent per Monday).",
+  "formula": "For each outflow row: wk1Value = week-1 value, total13w = sum of all 13. totalOutflowWk1 = sum of all rows' week-1 values. Captured only on 'future' view, once per Monday.",
+  "dependsOn": [
+   "payroll_per_week",
+   "inventory_per_week",
+   "subs_per_week",
+   "other_per_week",
+   "outflow_credit_card_payments",
+   "total_outflows_per_week"
+  ],
+  "affects": [],
+  "snapshotField": "outflows"
+ },
+ {
+  "id": "payroll_source_flag",
+  "label": "Payroll source flag (live / none)",
+  "aliases": [
+   "payroll source",
+   "is payroll live",
+   "payroll data status",
+   "payroll available",
+   "payroll flag"
+  ],
+  "definition": "Whether the Payroll outflow row has live data. 'live' when the monthly payroll run-rate > 0, else 'none' (row shows 0 with note 'No payroll data').",
+  "source": "cashflow13.ts (406): if (payrollMonthlyAvg > 0) payrollSource = 'live'. Default 'none'.",
+  "formula": "payrollSource = 'live' if payrollMonthlyAvg > 0, else 'none'.",
+  "dependsOn": [
+   "payroll_monthly_avg"
+  ],
+  "affects": [
+   "payroll_per_week"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "opex_source_flag",
+  "label": "Opex source flag (live / none) for Inventory, Subs, Other",
+  "aliases": [
+   "opex source",
+   "is opex live",
+   "expense data status",
+   "inventory source",
+   "other source flag",
+   "subs source"
+  ],
+  "definition": "A shared flag for the Inventory, Software & Subscriptions, and Other Expenses rows. 'live' if any of inventory, other, or subscription monthly run-rates > 0; else 'none'.",
+  "source": "cashflow13.ts (407): if (invMonthlyAvg > 0 || otherMonthlyAvg > 0 || subsMonthlyAvg > 0) opexSource = 'live'. Assigned to all three rows.",
+  "formula": "opexSource = 'live' if (invMonthlyAvg > 0 OR otherMonthlyAvg > 0 OR subsMonthlyAvg > 0), else 'none'. One populated category marks all three 'live'.",
+  "dependsOn": [
+   "inventory_monthly_avg",
+   "other_monthly_avg",
+   "subs_monthly_avg"
+  ],
+  "affects": [
+   "inventory_per_week",
+   "subs_per_week",
+   "other_per_week"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "other_monthly_avg",
+  "label": "Other Expenses - monthly run-rate",
+  "aliases": [
+   "other expenses monthly",
+   "miscellaneous monthly",
+   "baaki kharche monthly",
+   "opex monthly",
+   "non-payroll other run rate",
+   "other operating monthly"
+  ],
+  "definition": "The monthly run-rate of ALL remaining expense categories - everything not Payroll, not Inventory, not Subscriptions. Rolls up rent, utilities, insurance, marketing, legal, travel, taxes, bank fees, vehicle, R&D, capital, penalties, uncategorized, etc.",
+  "source": "cashflow13.ts (382-385): else branch adds each non-Payroll, non-Inventory, non-Subscriptions Combined row's monthly to otherMonthlyAvg and pushes {label: cat, monthly} to otherItems.",
+  "formula": "otherMonthlyAvg = sum over every Combined row not (Payroll) AND not (Inventory & Raw Materials) AND not (Software & Subscriptions) of [(sum of monthly values)/(count of non-zero months)].",
+  "dependsOn": [
+   "combined_expense_view",
+   "monthly_runrate_formula"
+  ],
+  "affects": [
+   "other_per_week",
+   "opex_source_flag",
+   "total_outflows_per_week",
+   "closing_cash_per_week",
+   "cash_status"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "other_per_week",
+  "label": "Other Expenses - weekly outflow",
+  "aliases": [
+   "weekly other expenses",
+   "other per week",
+   "misc per week",
+   "baaki kharche weekly",
+   "other outflow",
+   "opex weekly"
+  ],
+  "definition": "The Other Expenses outflow line in the 13-week cashflow. Same amount each week, equal to the monthly Other run-rate divided by 4.33.",
+  "source": "cashflow13.ts line 401: otherByWeek = new Array(13).fill(otherMonthlyAvg / 4.33). Surfaced in assumptions.otherPerWeek; note '... sum of all other Non-Payroll categories'.",
+  "formula": "other per week = otherMonthlyAvg / 4.33, identical across all 13 weeks.",
+  "dependsOn": [
+   "other_monthly_avg",
+   "weekly_spread_formula"
+  ],
+  "affects": [
+   "total_outflows_per_week",
+   "net_change_per_week",
+   "closing_cash_per_week",
+   "cash_status",
+   "snapshot_outflow_wk1",
+   "assumption_other_per_week"
+  ],
+  "snapshotField": "assumptions.otherPerWeek"
+ },
+ {
+  "id": "other_breakdown",
+  "label": "Other Expenses - per-category breakdown",
+  "aliases": [
+   "other expenses breakdown",
+   "what is in other",
+   "misc line items",
+   "baaki kharche list",
+   "other categories",
+   "other drilldown"
+  ],
+  "definition": "The list of individual expense categories rolled into Other Expenses (rent, utilities, insurance, marketing, legal, travel, taxes, bank fees, etc.), each with a weekly amount and approximate monthly figure.",
+  "source": "In cashflow13.ts, otherItems pushed as {label: cat, monthly} (category label, NOT exploded per-account). otherBreakdown = toExpBd(otherItems): >0, sorted desc, amount = monthly/4.33, sub '\u2248 $X/mo'.",
+  "formula": "For each non-payroll/non-inventory/non-subscription category: weekly = monthly run-rate / 4.33; sorted largest first. Kept at category granularity.",
+  "dependsOn": [
+   "other_monthly_avg",
+   "combined_expense_view"
+  ],
+  "affects": [
+   "other_per_week"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "expected_sub_monthly",
+  "label": "Expected monthly cost (per subscription)",
+  "aliases": [
+   "expected monthly",
+   "planned monthly cost",
+   "kitna hona chahiye monthly",
+   "har mahine ka expected kharcha",
+   "subscription ka planned amount",
+   "budgeted sub cost"
+  ],
+  "definition": "The hand-entered baseline monthly dollar amount we expect each known subscription/tool to cost. The analyst's reference (e.g. DATACREW = 3500, GUSTO = 820, GETTOBY.COM = 6).",
+  "source": "Hard-coded in DEFAULT_EXPECTED in audit.ts (27-74), one monthly per tool. 46 subscriptions. Static seed, not from QuickBooks.",
+  "formula": "Fixed number typed in per tool. DATACREW 3500, CCA SOLUTIONS 1500, HEADSET 1295, GUSTO 820, down to GETTOBY.COM 6.",
+  "dependsOn": [],
+  "affects": [
+   "derived_vs_expected_ratio",
+   "used_monthly",
+   "outlier_reason",
+   "used_source",
+   "active_subscriptions_monthly_sum"
+  ],
+  "snapshotField": "rows[].expected.monthly"
+ },
+ {
+  "id": "expected_bill_day",
+  "label": "Expected bill day (day of month)",
+  "aliases": [
+   "billing date",
+   "kis din charge hoga",
+   "monthly charge day",
+   "due date day",
+   "expected billing day"
+  ],
+  "definition": "The day of the month (1-31) we expect each subscription to be charged. Fallback when QB has no matching transactions.",
+  "source": "Hard-coded in DEFAULT_EXPECTED (27-74), billDay. DATACREW 17, CCA 8, GUSTO 1, GOOGLE WORKSPACE 30.",
+  "formula": "Fixed integer per tool. Used only when fewer than 2 QB transactions: derivedBillDay = expected.billDay.",
+  "dependsOn": [],
+  "affects": [
+   "derived_bill_day",
+   "used_bill_day"
+  ],
+  "snapshotField": "rows[].expected.billDay"
+ },
+ {
+  "id": "expected_pattern",
+  "label": "Expected billing pattern",
+  "aliases": [
+   "billing pattern",
+   "fixed ya variable",
+   "kaisa charge hota hai",
+   "recurring type",
+   "pattern type"
+  ],
+  "definition": "The expected cadence of each subscription's charges: FIXED (same amount monthly), PERIODIC (quarterly/annual), or VARIABLE (changes month to month). Fallback when QB has too few transactions.",
+  "source": "Hard-coded in DEFAULT_EXPECTED (27-74), pattern typed SubPattern. OPENAI/CHATGPT = VARIABLE, DATACREW = PERIODIC, SLACK = FIXED.",
+  "formula": "Fixed label per tool. Fallback for derivedPattern when fewer than 2 matching QB transactions.",
+  "dependsOn": [],
+  "affects": [
+   "derived_pattern",
+   "used_pattern"
+  ],
+  "snapshotField": "rows[].expected.pattern"
+ },
+ {
+  "id": "expected_aliases",
+  "label": "Subscription aliases / search keywords",
+  "aliases": [
+   "alternate names",
+   "keywords",
+   "alag naam",
+   "vendor ke dusre naam",
+   "search terms for sub"
+  ],
+  "definition": "Extra keywords/phrases used to recognize a subscription inside line-item descriptions, vendor names, memos, and doc numbers - covering cases where the QB vendor name differs from the display name.",
+  "source": "Hard-coded aliases array per entry in DEFAULT_EXPECTED (27-74). WEEDMAPS = ['weedmaps','weed maps','ghost mgmt','ghost management']; OPENAI = ['openai','chatgpt','open ai'].",
+  "formula": "Expected name plus aliases split into phrases by makePhrases(), de-duplicated into phraseSet, compiled into one case-insensitive regex used to scan transaction text.",
+  "dependsOn": [],
+  "affects": [
+   "line_hits",
+   "match_type"
+  ],
+  "snapshotField": "rows[].expected.aliases"
+ },
+ {
+  "id": "expected_subscription_count",
+  "label": "Total expected subscriptions tracked",
+  "aliases": [
+   "how many subs",
+   "kitne subscriptions",
+   "total tools tracked",
+   "number of subscriptions",
+   "sub list size"
+  ],
+  "definition": "The total number of distinct subscriptions/tools the audit tracks and cross-checks against QuickBooks.",
+  "source": "Length of DEFAULT_EXPECTED in audit.ts (27-74). 46 subscriptions.",
+  "formula": "Count of entries in DEFAULT_EXPECTED. 46 tools (DATACREW down to GETTOBY.COM).",
+  "dependsOn": [],
+  "affects": [
+   "match_counts",
+   "active_count",
+   "dormant_count"
+  ],
+  "snapshotField": "rows.length"
+ },
+ {
+  "id": "match_score",
+  "label": "Vendor name match score",
+  "aliases": [
+   "match confidence",
+   "naam match score",
+   "vendor matching score",
+   "kitna match hua",
+   "similarity score"
+  ],
+  "definition": "A 0-to-1 confidence score for how well an expected subscription name matches a QuickBooks vendor's display/company name.",
+  "source": "Computed by score() (95-110); stored as bestMatchScore on each AuditRow.",
+  "formula": "Both names lowercased and stripped. Identical -> 1.0. QB contains expected -> 0.92. Expected contains QB -> 0.88. Else token Jaccard: min(0.85, 0.5 + jaccard*0.5). Zero if no overlap.",
+  "dependsOn": [
+   "stopwords",
+   "qbo_vendors"
+  ],
+  "affects": [
+   "match_type",
+   "best_match_name",
+   "alternates",
+   "unexpected_vendors"
+  ],
+  "snapshotField": "rows[].bestMatchScore"
+ },
+ {
+  "id": "match_type",
+  "label": "Match type (strong / fuzzy / line / none)",
+  "aliases": [
+   "match quality",
+   "kis tarah match hua",
+   "matched kaise",
+   "match category",
+   "strong ya fuzzy"
+  ],
+  "definition": "A label for HOW each expected subscription was matched: 'strong' = high-confidence vendor match, 'fuzzy' = medium, 'line' = found only in line-item text, 'none' = not found.",
+  "source": "Set in 536-541 based on bestMatchScore and lineHits.",
+  "formula": "score >= 0.85 -> 'strong'; else >= 0.5 -> 'fuzzy'; else >=1 line hit -> 'line'; else 'none'.",
+  "dependsOn": [
+   "match_score",
+   "line_hits"
+  ],
+  "affects": [
+   "match_counts"
+  ],
+  "snapshotField": "rows[].matchType"
+ },
+ {
+  "id": "best_match_name",
+  "label": "Best matching QBO vendor name",
+  "aliases": [
+   "matched vendor",
+   "qb vendor name",
+   "kaunsa vendor match hua",
+   "matched vendor name"
+  ],
+  "definition": "The actual QuickBooks vendor display name that best matched a given expected subscription (or null if nothing scored above the threshold).",
+  "source": "Line 609: best?.vendor.DisplayName ?? null. best = highest-scoring vendor from the scored+filtered+sorted list.",
+  "formula": "Among all QBO vendors with score > 0.4, sort by score desc, take the top's DisplayName. Null if none clear 0.4.",
+  "dependsOn": [
+   "match_score",
+   "qbo_vendors"
+  ],
+  "affects": [
+   "activity_txn_count",
+   "unexpected_vendors"
+  ],
+  "snapshotField": "rows[].bestMatchName"
+ },
+ {
+  "id": "alternates",
+  "label": "Alternate vendor matches",
+  "aliases": [
+   "other matches",
+   "dusre matches",
+   "alternate vendors",
+   "runner up matches"
+  ],
+  "definition": "Up to three runner-up QuickBooks vendors (with scores) that also plausibly matched, for spot-checking ambiguous matches.",
+  "source": "Line 611: scored.slice(1, 4).map -> name + score.",
+  "formula": "From the score-sorted vendor list (score > 0.4), take ranks 2-4, record name and score.",
+  "dependsOn": [
+   "match_score"
+  ],
+  "affects": [],
+  "snapshotField": "rows[].alternates"
+ },
+ {
+  "id": "activity_txn_count",
+  "label": "Transaction count (per subscription)",
+  "aliases": [
+   "number of charges",
+   "kitni baar charge hua",
+   "txn count",
+   "how many transactions",
+   "charge count"
+  ],
+  "definition": "How many matching QuickBooks transactions (purchases + bills, or line hits) were found for a subscription within the lookback window.",
+  "source": "From the Activity object (bumpById/bumpByName, 410-430), surfaced as combinedActivity.txnCount (547) or, for line-only, lineHits.length (558).",
+  "formula": "Each matching Purchase (with Vendor EntityRef) or Bill increments txnCount by 1. Line-only: txnCount = number of line-item hits.",
+  "dependsOn": [
+   "best_match_name",
+   "line_hits"
+  ],
+  "affects": [
+   "activity_avg_amount",
+   "derived_monthly",
+   "unexpected_vendors"
+  ],
+  "snapshotField": "rows[].activity.txnCount"
+ },
+ {
+  "id": "activity_total_amount",
+  "label": "Total amount (per subscription)",
+  "aliases": [
+   "total spent",
+   "kul kharcha",
+   "total amount on sub",
+   "how much spent total",
+   "sum of charges"
+  ],
+  "definition": "The sum of all matching transaction amounts for a subscription across the lookback window.",
+  "source": "Accumulated in Activity.totalAmount (413, 424) by summing TotalAmt; surfaced as combinedActivity.totalAmount (548). Line-only: sum of line-hit amounts (554).",
+  "formula": "Add up the amount of every matching transaction. Vendor: sum of TotalAmt. Line-only: sum of each line hit's amount.",
+  "dependsOn": [
+   "activity_txn_count"
+  ],
+  "affects": [
+   "activity_avg_amount",
+   "unexpected_vendors"
+  ],
+  "snapshotField": "rows[].activity.totalAmount"
+ },
+ {
+  "id": "activity_avg_amount",
+  "label": "Average amount per transaction",
+  "aliases": [
+   "average charge",
+   "aursat charge",
+   "avg per txn",
+   "mean charge amount"
+  ],
+  "definition": "The average dollar amount per matching transaction (total amount divided by transaction count).",
+  "source": "Line 549: activity.totalAmount / activity.txnCount (and 559 for line-only).",
+  "formula": "Total amount of all matching transactions divided by the number of those transactions.",
+  "dependsOn": [
+   "activity_total_amount",
+   "activity_txn_count"
+  ],
+  "affects": [],
+  "snapshotField": "rows[].activity.avgAmount"
+ },
+ {
+  "id": "activity_last_date",
+  "label": "Last transaction date (per subscription)",
+  "aliases": [
+   "last charge date",
+   "aakhri charge kab",
+   "most recent transaction",
+   "last seen date",
+   "latest charge"
+  ],
+  "definition": "The most recent date a matching transaction was seen. The most important field for deciding active vs dormant.",
+  "source": "Tracked in Activity.lastDate (414, 425); surfaced as combinedActivity.lastDate (550). Line-only: latest line-hit date (555).",
+  "formula": "The maximum (latest) TxnDate among all matching transactions.",
+  "dependsOn": [
+   "activity_txn_count",
+   "line_hits"
+  ],
+  "affects": [
+   "active_dormant_status",
+   "active_count",
+   "dormant_count",
+   "active_subscriptions_monthly_sum"
+  ],
+  "snapshotField": "rows[].activity.lastDate"
+ },
+ {
+  "id": "line_hits",
+  "label": "Line-item description hits",
+  "aliases": [
+   "line item matches",
+   "line item me mila",
+   "description matches",
+   "credit card sub hits"
+  ],
+  "definition": "Individual transactions where the subscription name/alias was found inside a line-item description, memo, doc number, or account name - catching credit-card subscriptions that hit a generic expense account.",
+  "source": "Built in scanTxn (506-533); the phrase regex (495-504) tested against line descriptions and header text. Stored as lineHits, capped at 5 in output (613).",
+  "formula": "Build a regex from name + aliases as whole phrases (single words get \\b boundaries). For each Purchase/Bill, test against line descriptions and header fields; record date, amount, description. One hit per transaction.",
+  "dependsOn": [
+   "expected_aliases"
+  ],
+  "affects": [
+   "match_type",
+   "activity_txn_count",
+   "matched_txns"
+  ],
+  "snapshotField": "rows[].lineHits"
+ },
+ {
+  "id": "monthly_amounts",
+  "label": "Per-month spend array",
+  "aliases": [
+   "monthly breakdown",
+   "har mahine ka kharcha",
+   "month by month spend",
+   "monthly column values"
+  ],
+  "definition": "For each subscription, an array of dollar totals - one per completed month in the lookback - showing monthly spend, aligned with the dashboard's month columns.",
+  "source": "Activity.monthly per-month bucket (416-417, 427-428) using monthIndex; copied to monthlyAmounts (552), or line-only built 562-565.",
+  "formula": "For each matched transaction, find its completed month (YYYY-MM) and add its amount to that month's bucket. Array length/order match result.months.",
+  "dependsOn": [
+   "audit_months"
+  ],
+  "affects": [],
+  "snapshotField": "rows[].monthlyAmounts"
+ },
+ {
+  "id": "derived_monthly",
+  "label": "QB-derived monthly cost",
+  "aliases": [
+   "actual monthly from qb",
+   "quickbooks se nikla monthly",
+   "real monthly cost",
+   "derived monthly amount",
+   "computed monthly"
+  ],
+  "definition": "The live monthly cost from actual QuickBooks transactions - the median of the months that actually had a charge, so multi-charge months and quarterly/annual subs are handled correctly.",
+  "source": "deriveSubMetrics() (194-250), medMonthly (214), rounded (245). Surfaced as derivedMonthly.",
+  "formula": "Group matching transactions by month, sum each. Take months with positive total, then the MEDIAN of those non-zero totals, 2dp. Requires 2+ transactions; fewer -> falls back to expected (hasQbData=false).",
+  "dependsOn": [
+   "matched_txns",
+   "expected_sub_monthly",
+   "has_qb_data"
+  ],
+  "affects": [
+   "derived_vs_expected_ratio",
+   "used_monthly",
+   "outlier_reason",
+   "used_source"
+  ],
+  "snapshotField": "rows[].derivedMonthly"
+ },
+ {
+  "id": "derived_bill_day",
+  "label": "QB-derived bill day",
+  "aliases": [
+   "actual billing day",
+   "qb se billing din",
+   "real charge day",
+   "computed bill day"
+  ],
+  "definition": "The actual day of the month a subscription tends to be charged, computed from real QuickBooks transactions (the median charge day).",
+  "source": "deriveSubMetrics() 217-218: median of day-of-month across matching transactions, clamped 1-31.",
+  "formula": "Median of the day-of-month of every matching transaction, rounded, clamped 1-31. Fewer than 2 transactions -> expected billDay.",
+  "dependsOn": [
+   "matched_txns",
+   "expected_bill_day",
+   "has_qb_data"
+  ],
+  "affects": [
+   "used_bill_day"
+  ],
+  "snapshotField": "rows[].derivedBillDay"
+ },
+ {
+  "id": "derived_pattern",
+  "label": "QB-derived billing pattern",
+  "aliases": [
+   "actual pattern",
+   "qb se pattern",
+   "real billing cadence",
+   "computed pattern"
+  ],
+  "definition": "The actual billing cadence (FIXED, PERIODIC, VARIABLE) inferred from QuickBooks, based on how steady monthly amounts are and how far apart charges fall.",
+  "source": "deriveSubMetrics() 220-242: uses coefficient-of-variation of monthly totals and average gap between charges.",
+  "formula": "avg gap > 45 days -> PERIODIC; else CV < 0.05 -> FIXED; else VARIABLE. Fewer than 2 transactions -> expected pattern.",
+  "dependsOn": [
+   "matched_txns",
+   "expected_pattern",
+   "has_qb_data"
+  ],
+  "affects": [
+   "used_pattern"
+  ],
+  "snapshotField": "rows[].derivedPattern"
+ },
+ {
+  "id": "has_qb_data",
+  "label": "Has QuickBooks data flag",
+  "aliases": [
+   "qb data hai ya nahi",
+   "real data flag",
+   "derived from qb",
+   "has actual transactions"
+  ],
+  "definition": "A true/false flag for whether derived metrics came from 2+ actual QB transactions (true) or fell back to expected values (false).",
+  "source": "Returned by deriveSubMetrics(): false when txns.length < 2 (203), true otherwise (248).",
+  "formula": "True if 2+ matching QB transactions; false otherwise (derived* equal expected).",
+  "dependsOn": [
+   "matched_txns"
+  ],
+  "affects": [
+   "used_source",
+   "derived_monthly",
+   "outlier_reason",
+   "derived_vs_expected_ratio"
+  ],
+  "snapshotField": "rows[].hasQbData"
+ },
+ {
+  "id": "matched_txns",
+  "label": "Matched transactions for derivation",
+  "aliases": [
+   "matched charges",
+   "derivation ke transactions",
+   "transactions used",
+   "sample transactions"
+  ],
+  "definition": "The full set of transactions (vendor activity plus line hits) collected for one subscription and fed into the metric-derivation step.",
+  "source": "Assembled 568-577: activity.txns if a vendor match exists, otherwise the line hits. Passed to deriveSubMetrics().",
+  "formula": "If vendor activity, use all matched transactions. If none but there are line hits, use the line hits (date+amount) instead.",
+  "dependsOn": [
+   "activity_txn_count",
+   "line_hits"
+  ],
+  "affects": [
+   "derived_monthly",
+   "derived_bill_day",
+   "derived_pattern",
+   "has_qb_data",
+   "sample_dates"
+  ],
+  "snapshotField": "rows[].sampleDates"
+ },
+ {
+  "id": "sample_dates",
+  "label": "Sample transaction dates",
+  "aliases": [
+   "sample dates",
+   "spot check dates",
+   "kuch transaction dates",
+   "example dates"
+  ],
+  "definition": "Up to 8 sorted dates of the matched transactions, for spot-checking the derivation.",
+  "source": "Line 624: matchedTxns.map(t => t.date).sort().slice(0, 8).",
+  "formula": "Take dates of all matched transactions, sort ascending, keep first 8.",
+  "dependsOn": [
+   "matched_txns"
+  ],
+  "affects": [],
+  "snapshotField": "rows[].sampleDates"
+ },
+ {
+  "id": "derived_vs_expected_ratio",
+  "label": "Derived-to-expected ratio (outlier check)",
+  "aliases": [
+   "ratio check",
+   "kitna off hai",
+   "derived vs expected",
+   "sanity ratio",
+   "outlier ratio"
+  ],
+  "definition": "How far the QB-derived monthly is from the analyst's expected monthly, as a ratio. A sanity check to decide whether to trust QB or fall back to expected.",
+  "source": "Line 593: ratio = derivedMonthly / exp.monthly. Tested against thresholds (594).",
+  "formula": "derivedMonthly / expected monthly. If > 3 or < 0.33, the QB number is treated as an outlier and rejected for expected.",
+  "dependsOn": [
+   "derived_monthly",
+   "expected_sub_monthly",
+   "has_qb_data"
+  ],
+  "affects": [
+   "used_monthly",
+   "used_bill_day",
+   "used_pattern",
+   "used_source",
+   "outlier_reason"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "used_monthly",
+  "label": "Used monthly (projection input)",
+  "aliases": [
+   "final monthly",
+   "jo number use hua",
+   "monthly for forecast",
+   "projection monthly",
+   "run rate monthly per sub"
+  ],
+  "definition": "The final monthly cost the dashboard plugs into the 13-week projection for a subscription - the QB-derived number unless it failed the sanity check, in which case it reverts to expected.",
+  "source": "587-604. Starts as derivedMonthly; overwritten with exp.monthly if the outlier check trips.",
+  "formula": "Default usedMonthly = derivedMonthly. If QB data AND ratio > 3x or < 0.33x, set usedMonthly = expected.monthly. Feeds the projection.",
+  "dependsOn": [
+   "derived_monthly",
+   "expected_sub_monthly",
+   "derived_vs_expected_ratio",
+   "has_qb_data"
+  ],
+  "affects": [
+   "active_subscriptions_monthly_sum",
+   "used_source"
+  ],
+  "snapshotField": "rows[].usedMonthly"
+ },
+ {
+  "id": "used_bill_day",
+  "label": "Used bill day (projection input)",
+  "aliases": [
+   "final billing day",
+   "jo billing din use hua",
+   "projection bill day"
+  ],
+  "definition": "The final day-of-month the projection uses to time a subscription's charge - QB-derived unless the outlier check forces expected.",
+  "source": "588, 596. Starts as derivedBillDay; set to exp.billDay on outlier.",
+  "formula": "Default = derivedBillDay. If outlier check trips, usedBillDay = expected.billDay.",
+  "dependsOn": [
+   "derived_bill_day",
+   "expected_bill_day",
+   "derived_vs_expected_ratio"
+  ],
+  "affects": [],
+  "snapshotField": "rows[].usedBillDay"
+ },
+ {
+  "id": "used_pattern",
+  "label": "Used pattern (projection input)",
+  "aliases": [
+   "final pattern",
+   "jo pattern use hua",
+   "projection pattern"
+  ],
+  "definition": "The final billing pattern the projection uses - QB-derived unless the outlier check forces expected.",
+  "source": "589, 597. Starts as derivedPattern; set to exp.pattern on outlier.",
+  "formula": "Default = derivedPattern. If outlier check trips, usedPattern = expected.pattern.",
+  "dependsOn": [
+   "derived_pattern",
+   "expected_pattern",
+   "derived_vs_expected_ratio"
+  ],
+  "affects": [],
+  "snapshotField": "rows[].usedPattern"
+ },
+ {
+  "id": "used_source",
+  "label": "Used-value source",
+  "aliases": [
+   "data source",
+   "number kahan se aaya",
+   "qb ya expected",
+   "source of used value",
+   "kaunsa source"
+  ],
+  "definition": "Where the final used values came from: 'qb' (trusted QB-derived), 'expected' (no QB data), or 'expected_outlier' (had QB data but failed the sanity check).",
+  "source": "590: hasQbData ? 'qb' : 'expected'. 598 overwrites to 'expected_outlier' on ratio trip.",
+  "formula": "No QB data -> 'expected'. QB data and ratio sane -> 'qb'. QB data but ratio > 3x or < 0.33x -> 'expected_outlier'.",
+  "dependsOn": [
+   "has_qb_data",
+   "derived_vs_expected_ratio"
+  ],
+  "affects": [
+   "outlier_reason"
+  ],
+  "snapshotField": "rows[].usedSource"
+ },
+ {
+  "id": "outlier_reason",
+  "label": "Outlier reason text",
+  "aliases": [
+   "why outlier",
+   "kyun outlier hai",
+   "outlier explanation",
+   "reason for fallback",
+   "why expected used"
+  ],
+  "definition": "A human-readable sentence explaining why a subscription's QuickBooks number was rejected as an outlier and the expected value used instead.",
+  "source": "Built 599-602. Only set when usedSource === 'expected_outlier'.",
+  "formula": "If QB derived > 3x expected, text says QB is N times expected and the vendor likely catches non-subscription spend (e.g. Gusto payroll wages). If < a third, text says QB is X% of expected, likely a partial match.",
+  "dependsOn": [
+   "derived_vs_expected_ratio",
+   "derived_monthly",
+   "expected_sub_monthly",
+   "used_source"
+  ],
+  "affects": [],
+  "snapshotField": "rows[].outlierReason"
+ },
+ {
+  "id": "active_dormant_status",
+  "label": "Active vs dormant status",
+  "aliases": [
+   "active hai ya nahi",
+   "chalu ya band",
+   "cancelled subscription",
+   "still active",
+   "dormant sub"
+  ],
+  "definition": "Whether a subscription counts as ACTIVE (charged at least once recently) or DORMANT (no recent charge, likely cancelled). Dormant subs are excluded from the projected run-rate.",
+  "source": "computeActiveSubscriptionsMonthly() (344-366). Active if activity.lastDate >= cutoff (357), else dormant (362).",
+  "formula": "cutoff = today minus recentMonths (default 4). ACTIVE if last transaction date on/after cutoff; else DORMANT. No activity at all -> dormant.",
+  "dependsOn": [
+   "activity_last_date",
+   "recent_months_window"
+  ],
+  "affects": [
+   "active_count",
+   "dormant_count",
+   "active_subscriptions_monthly_sum",
+   "active_rows"
+  ],
+  "snapshotField": "rows[].activity.lastDate"
+ },
+ {
+  "id": "recent_months_window",
+  "label": "Recent-activity window (active cutoff)",
+  "aliases": [
+   "active window",
+   "kitne mahine ka window",
+   "recency window",
+   "active cutoff months",
+   "lookback for active"
+  ],
+  "definition": "The number of months of recent activity used to decide active vs dormant. A subscription must have a charge within this window to count active.",
+  "source": "Parameter recentMonths in computeActiveSubscriptionsMonthly (346), default 4. Cutoff 348-350.",
+  "formula": "Default 4. cutoff = today with month reduced by recentMonths. Any sub whose last charge is on/after cutoff is active.",
+  "dependsOn": [],
+  "affects": [
+   "active_dormant_status",
+   "active_count",
+   "dormant_count",
+   "active_subscriptions_monthly_sum"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "active_count",
+  "label": "Active subscription count",
+  "aliases": [
+   "kitne active subs",
+   "number of active subscriptions",
+   "active tools count",
+   "chalu subscriptions"
+  ],
+  "definition": "How many subscriptions are currently active (had a charge within the recent-activity window).",
+  "source": "computeActiveSubscriptionsMonthly increments activeCount for each row whose lastDate >= cutoff (359).",
+  "formula": "Count of audit rows whose last transaction date is on/after the active cutoff.",
+  "dependsOn": [
+   "active_dormant_status",
+   "recent_months_window"
+  ],
+  "affects": [
+   "active_subscriptions_monthly_sum"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "dormant_count",
+  "label": "Dormant subscription count",
+  "aliases": [
+   "kitne dormant subs",
+   "number of dormant subscriptions",
+   "cancelled subs count",
+   "band subscriptions",
+   "inactive subs"
+  ],
+  "definition": "How many subscriptions are dormant (no charge within the recent window, likely cancelled) and excluded from the run-rate.",
+  "source": "computeActiveSubscriptionsMonthly increments dormantCount for each non-active row (362).",
+  "formula": "Count of audit rows whose last transaction date is before the active cutoff, or with no activity.",
+  "dependsOn": [
+   "active_dormant_status",
+   "recent_months_window"
+  ],
+  "affects": [],
+  "snapshotField": ""
+ },
+ {
+  "id": "active_subscriptions_monthly_sum",
+  "label": "Active subscription monthly run-rate",
+  "aliases": [
+   "total monthly subscriptions",
+   "subscription run rate",
+   "kul monthly subscription kharcha",
+   "active subs monthly total",
+   "monthly burn from subscriptions",
+   "run-rate feeding 13 week"
+  ],
+  "definition": "The single total monthly dollar figure for all ACTIVE subscriptions combined - the subscription run-rate that feeds the 13-week cashflow. Dormant subs excluded.",
+  "source": "computeActiveSubscriptionsMonthly() (344-366): activeMonthlySum accumulates r.usedMonthly for each active row (358); returned rounded 2dp (365).",
+  "formula": "For every active subscription (last charge within recent window), add usedMonthly. Sum rounded 2dp. Dormant subs contribute nothing.",
+  "dependsOn": [
+   "used_monthly",
+   "active_dormant_status",
+   "active_count",
+   "recent_months_window"
+  ],
+  "affects": [
+   "subs_monthly_avg",
+   "subs_per_week"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "active_rows",
+  "label": "Active subscription rows",
+  "aliases": [
+   "list of active subs",
+   "active wali list",
+   "which subs are active",
+   "active subscription details"
+  ],
+  "definition": "The list of full audit rows for just the active subscriptions, returned alongside the run-rate so the dashboard can show which tools make up the active monthly total.",
+  "source": "computeActiveSubscriptionsMonthly pushes each active row into activeRows (360).",
+  "formula": "Collect every audit row qualifying as active (last charge on/after cutoff).",
+  "dependsOn": [
+   "active_dormant_status"
+  ],
+  "affects": [
+   "active_subscriptions_monthly_sum",
+   "subs_breakdown"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "match_counts",
+  "label": "Match summary counts (strong/fuzzy/line/missing)",
+  "aliases": [
+   "match breakdown",
+   "kitne strong kitne missing",
+   "summary of matches",
+   "match summary counts"
+  ],
+  "definition": "A summary of how many subscriptions fell into each match category: strong, fuzzy, line, and missing.",
+  "source": "counts object (628-633) filtering rows on matchType.",
+  "formula": "Count rows where matchType === 'strong','fuzzy','line', and 'none' (reported as 'missing').",
+  "dependsOn": [
+   "match_type"
+  ],
+  "affects": [],
+  "snapshotField": "counts"
+ },
+ {
+  "id": "unexpected_vendors",
+  "label": "Unexpected recurring vendors",
+  "aliases": [
+   "unknown subscriptions",
+   "nayi vendors",
+   "unexpected charges",
+   "subs not on list",
+   "unaccounted recurring vendors"
+  ],
+  "definition": "QuickBooks vendors that recur (2+ transactions) but are NOT on the expected subscription list - potential unaccounted subscriptions or recurring spend.",
+  "source": "Built 635-656. Iterates activity by vendor id, skips matched vendors and those with fewer than 2 transactions, sorts by totalAmount desc, keeps top 30 (668).",
+  "formula": "For every unmatched QBO vendor with 2+ transactions, record displayName, txnCount, totalAmount, avgAmount, lastDate. Sort by total amount desc, keep top 30.",
+  "dependsOn": [
+   "best_match_name",
+   "activity_txn_count",
+   "activity_total_amount"
+  ],
+  "affects": [],
+  "snapshotField": "unexpectedVendors"
+ },
+ {
+  "id": "audit_lookback_months",
+  "label": "Audit lookback window (months)",
+  "aliases": [
+   "lookback period",
+   "kitne mahine peeche",
+   "history window",
+   "audit lookback",
+   "data window months"
+  ],
+  "definition": "How many months of QuickBooks transaction history the audit pulls to analyze subscriptions.",
+  "source": "lookbackMonths parameter of runSubscriptionAudit (default 6, 370); getCachedSubscriptionAudit default 16 (325). Computes since and month columns.",
+  "formula": "Default 6 in runSubscriptionAudit, but the cached entry point defaults to 16 months. since = today minus lookbackMonths; only transactions on/after since queried.",
+  "dependsOn": [],
+  "affects": [
+   "audit_months",
+   "activity_total_amount",
+   "activity_txn_count",
+   "derived_monthly"
+  ],
+  "snapshotField": "lookbackMonths"
+ },
+ {
+  "id": "audit_months",
+  "label": "Completed month columns",
+  "aliases": [
+   "month columns",
+   "kaun se mahine",
+   "month headers",
+   "monthly buckets",
+   "columns months"
+  ],
+  "definition": "The list of completed (fully past) months that form the column headers for per-month spend, excluding the current in-progress month.",
+  "source": "Built 379-387: loops from lookbackMonths down to 1, producing YYYY-MM keys (months) and 'Mon YYYY' labels.",
+  "formula": "For i from lookbackMonths down to 1, the month i months before the current; format YYYY-MM and 'Mon YYYY'. Current month excluded (may be incomplete).",
+  "dependsOn": [
+   "audit_lookback_months"
+  ],
+  "affects": [
+   "monthly_amounts"
+  ],
+  "snapshotField": "months"
+ },
+ {
+  "id": "audit_totals",
+  "label": "QBO data totals (vendors/purchases/bills)",
+  "aliases": [
+   "data counts",
+   "kitne vendors purchases bills",
+   "totals fetched",
+   "record counts"
+  ],
+  "definition": "Counts of the raw QuickBooks records the audit pulled: total vendors, total purchases, and total bills in the lookback window.",
+  "source": "Line 663: totals = {vendors, purchases, bills}. Data fetched via qboQuery (390-394).",
+  "formula": "vendors = count of all Vendor records; purchases = count of Purchase records with TxnDate >= since; bills = count of Bill records with TxnDate >= since.",
+  "dependsOn": [
+   "audit_lookback_months"
+  ],
+  "affects": [
+   "match_score",
+   "activity_txn_count",
+   "unexpected_vendors"
+  ],
+  "snapshotField": "totals"
+ },
+ {
+  "id": "audit_as_of",
+  "label": "Audit as-of timestamp / realmId",
+  "aliases": [
+   "audit time",
+   "kab ki report hai",
+   "as of date",
+   "data timestamp",
+   "report freshness"
+  ],
+  "definition": "When the audit was run (asOf), the QuickBooks company id (realmId), and the since date marking the start of the data window.",
+  "source": "659-662: asOf = current ISO time, realmId from the OAuth token, since = sinceStr.",
+  "formula": "asOf = when runSubscriptionAudit finished. realmId from the validated QB access token. since = earliest transaction date included.",
+  "dependsOn": [
+   "audit_lookback_months"
+  ],
+  "affects": [],
+  "snapshotField": "asOf"
+ },
+ {
+  "id": "audit_cache_ttl",
+  "label": "Audit cache freshness (TTL)",
+  "aliases": [
+   "cache time",
+   "kitni der purana",
+   "data refresh interval",
+   "cache ttl",
+   "kitni baar refresh"
+  ],
+  "definition": "How long a computed audit result is reused before recompute - cached for one hour to avoid re-fetching QuickBooks on every request.",
+  "source": "_AUDIT_CACHE_TTL_MS = 60*60*1000 (321). getCachedSubscriptionAudit reuses cache if same lookback and age < TTL (326-328); only caches non-empty (335). invalidateSubscriptionAuditCache clears it (323).",
+  "formula": "Reused if same lookbackMonths and < 1 hour old; otherwise recomputed. An in-flight request is shared so two callers don't both fetch.",
+  "dependsOn": [
+   "audit_lookback_months"
+  ],
+  "affects": [
+   "active_subscriptions_monthly_sum",
+   "subs_monthly_avg"
+  ],
+  "snapshotField": ""
+ },
+ {
+  "id": "stopwords",
+  "label": "Stopwords (name-matching noise filter)",
+  "aliases": [
+   "ignore words",
+   "faltu shabd",
+   "filler words",
+   "matching stopwords"
+  ],
+  "definition": "Generic words (inc, llc, software, membership, etc.) stripped before matching subscription names to vendor names, so filler words don't create false matches.",
+  "source": "STOPWORDS set (76-81). Used by tokens() (92) feeding the Jaccard part of score() (102-103).",
+  "formula": "When tokenizing for fuzzy matching, drop tokens in STOPWORDS (inc, llc, ltd, co, corp, corporation, company, the, and, a, an, of, for, to, software, service, services, tech, technologies, com, membership, subscription, sub, app, apps) before token overlap.",
+  "dependsOn": [],
+  "affects": [
+   "match_score",
+   "match_type"
+  ],
+  "snapshotField": ""
+ }
+]

@@ -1,0 +1,10 @@
+import { loadAll } from '../src/ar/lib/sheets.js'
+const data = await loadAll()
+const money=n=>'$'+Math.round(n).toLocaleString()
+const match = v => /patient station/i.test(v||'')
+console.log('=== data.invoices (wholesale tracker) records for "The Patient Station" ===')
+data.invoices.filter(r=>match(r.vendor)).forEach(r=>console.log('  ',r.invNo.padEnd(7), 'vendor="'+r.vendor+'"', 'brand='+(r.brand||'-'), money(r.invoiceAmount)))
+console.log('\n=== data.gelato (Pure X sheet) records for "The Patient Station" ===')
+;(data.gelato||[]).filter(r=>match(r.vendor)).forEach(r=>console.log('  ',r.invNo.padEnd(7), 'vendor="'+r.vendor+'"', money(r.invoiceAmount)))
+console.log('\ndistinct vendor strings in invoices:', [...new Set(data.invoices.filter(r=>match(r.vendor)).map(r=>r.vendor))])
+console.log('distinct vendor strings in gelato  :', [...new Set((data.gelato||[]).filter(r=>match(r.vendor)).map(r=>r.vendor))])

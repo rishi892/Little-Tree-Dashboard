@@ -1,0 +1,33 @@
+# Dependencies + build artefacts
+node_modules
+dist
+.DS_Store
+
+# CRITICAL: do NOT commit / push QuickBooks OAuth tokens. Every time a code
+# push overwrites these on the server, the user has to re-connect QB. Keep
+# them server-local only.
+.tokens.json
+.tokens.json.tmp
+
+# Server-local environment secrets (Intuit client id/secret, etc.)
+.env
+.env.local
+.env.production
+
+# Per-deployment cache / scrape artefacts (megabytes of JSON the server
+# writes during normal operation — re-fetched on demand, never source-controlled)
+.invoice-scrape-cache.json
+.tmp-*.json
+.tmp-*.csv
+.brand-emails.json
+.category-overrides.json
+.cashflow-overrides.json
+.commission-overrides.json
+.weekly-snapshots.json
+.reviews.json
+.review-uploads/
+.agency-handoffs.json
+
+# Local debug logs
+*.log
+tunnel*.log

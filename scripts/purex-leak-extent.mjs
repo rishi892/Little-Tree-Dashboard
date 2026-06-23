@@ -1,0 +1,15 @@
+import { loadAll } from '../src/ar/lib/sheets.js'
+import { isInAr, isPrivateLabel } from '../src/ar/lib/brands.js'
+const data = await loadAll()
+const money=n=>'$'+Math.round(n).toLocaleString()
+const isPureXVendor = v => /^\s*gelato-/i.test(v||'')
+const vb=new Map(); data.invoices.forEach(r=>{if(r.vendor&&r.brand&&!vb.has(r.vendor))vb.set(r.vendor,r.brand)})
+// "Gelato-" prefixed vendors in the INVOICE TRACKER that survive isInAr (leak into LT AR/DSO)
+const inArLeak = data.invoices.filter(r=>isPureXVendor(r.vendor) && isInAr(r, vb.get(r.vendor)))
+console.log('"Gelato-" vendors in invoice tracker surviving isInAr (leak into LT AR/DSO):', inArLeak.length, money(inArLeak.reduce((s,r)=>s+r.invoiceAmount,0)))
+const openLeak = inArLeak.filter(r=>r.isOutstanding)
+console.log('  of which OPEN (leak into Total outstanding / By-Rep):', openLeak.length, money(openLeak.reduce((s,r)=>s+r.outstanding,0)))
+// in dsoInvoices (data.invoices minus private-label brand)
+const dsoLeak = data.invoices.filter(r=>isPureXVendor(r.vendor) && !isPrivateLabel(vb.get(r.vendor)||r.brand))
+console.log('  in dsoInvoices (DSO basis):', dsoLeak.length, money(dsoLeak.reduce((s,r)=>s+r.invoiceAmount,0)))
+console.log('  sample:', [...new Set(inArLeak.map(r=>r.vendor))].slice(0,5).join(' | '))

@@ -1,0 +1,44 @@
+# Dependencies + build
+node_modules
+dist
+.DS_Store
+*.local
+
+# Vite cache
+.vite
+
+# CRITICAL: never commit QuickBooks OAuth tokens or environment secrets —
+# pushing them overwrites whatever the production server has rotated to,
+# forcing a fresh OAuth re-connect every deploy.
+**/.tokens.json
+**/.tokens.json.tmp
+**/.env
+.env
+.env.local
+.env.production
+
+# Per-deployment cache files inside cashflow-server (server regenerates
+# these on demand; pushing local copies wastes diff space and stomps
+# fresher production data).
+**/.invoice-scrape-cache.json
+**/.tmp-*.json
+**/.tmp-*.csv
+**/.brand-emails.json
+**/.category-overrides.json
+**/.cashflow-overrides.json
+**/.commission-overrides.json
+**/.weekly-snapshots.json
+
+# Original zip extract — code is already integrated into src/cashflow/ +
+# cashflow-server/, the zip is just a backup.
+Cashflow LT.zip
+
+# Local-only binaries (Cloudflare quick-tunnel for sharing dev URLs)
+cloudflared.exe
+
+# Logs
+*.log
+tunnel*.log
+
+# Bot change-tracking history (regenerated at runtime)
+**/.assistant-history.json
