@@ -11,12 +11,9 @@
  * are optional - user can override only paidBy, only lineItem, or both.
  */
 
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileStore as fs } from './kvStore.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const OVERRIDES_FILE = path.resolve(__dirname, '..', '.category-overrides.json');
+const OVERRIDES_FILE = '.category-overrides.json';
 
 export type OverridePaidBy = 'PureX' | 'Moysh' | 'Combined' | 'Other';
 export type CategoryOverride = {

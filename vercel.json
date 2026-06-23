@@ -1,0 +1,19 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm run install:all",
+  "buildCommand": "npm run build:all",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 60,
+      "includeFiles": "cashflow-server/{dist/**,botKnowledge.json}"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index" },
+    { "source": "/auth/(.*)", "destination": "/api/index" },
+    { "source": "/cashflow", "destination": "/cashflow.html" },
+    { "source": "/cashflow/(.*)", "destination": "/cashflow.html" },
+    { "source": "/((?!assets/).*)", "destination": "/index.html" }
+  ]
+}

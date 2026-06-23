@@ -158,7 +158,24 @@
       "Bash(gh auth *)",
       "Bash(git init *)",
       "Bash(git add *)",
-      "Bash(grep -iE '\\\\.env$|\\\\.tokens\\\\.json|\\\\.tmp-|node_modules|weekly-snapshots|assistant-history')"
+      "Bash(grep -iE '\\\\.env$|\\\\.tokens\\\\.json|\\\\.tmp-|node_modules|weekly-snapshots|assistant-history')",
+      "Bash(git branch *)",
+      "Bash(git commit -q -m ' *)",
+      "Bash(git remote *)",
+      "Bash(echo \"remote: $\\(git remote get-url origin\\)\")",
+      "Bash(git push *)",
+      "Bash(brew --version)",
+      "Bash(echo \"brew: $\\(brew --version)",
+      "Bash(git credential-osxkeychain *)",
+      "Bash(git ls-remote *)",
+      "Bash(grep -iE '\\\\.env$|\\\\.tokens\\\\.json')",
+      "Bash(python3 -c \"import json;d=json.load\\(open\\('package.json'\\)\\);print\\('name:',d.get\\('name'\\)\\);print\\('scripts:',json.dumps\\(d.get\\('scripts',{}\\),indent=1\\)\\)\")",
+      "Bash(grep -rnE \"cfovaani|localhost:4747|VITE_|import.meta.env|fetch\\\\\\('/api|fetch\\\\\\(\\\\`/api\" src/cashflow/api.ts src/ar)",
+      "Read(//Users/rishiarora/Documents/Vs Code/**)",
+      "Bash(xargs -I{} basename {})",
+      "Bash(perl -0777 -i -pe \"s/import fs from 'node:fs\\\\/promises';\\\\nimport path from 'node:path';\\\\nimport \\\\{ fileURLToPath \\\\} from 'node:url';/import { fileStore as fs } from '.\\\\/kvStore.js';/\" invoiceScraper.ts)",
+      "Bash(perl -0777 -i -pe \"s/const __dirname = path\\\\.dirname\\\\\\(fileURLToPath\\\\\\(import\\\\.meta\\\\.url\\\\\\)\\\\\\);\\\\nconst \\(\\\\w+\\) = path\\\\.resolve\\\\\\(__dirname, '\\\\.\\\\.', '\\([^']+\\)'\\\\\\);/const \\\\$1 = '\\\\$2';/\" invoiceScraper.ts)",
+      "Bash(grep -vE '^\\\\s*#|^\\\\s*$')"
     ],
     "additionalDirectories": [
       "/tmp"

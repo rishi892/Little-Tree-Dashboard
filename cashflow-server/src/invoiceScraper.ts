@@ -26,12 +26,9 @@
  * so re-scrapes are essentially free.
  */
 
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileStore as fs } from './kvStore.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CACHE_FILE = path.resolve(__dirname, '..', '.invoice-scrape-cache.json');
+const CACHE_FILE = '.invoice-scrape-cache.json';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36';
 

@@ -14,9 +14,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fileStore } from './kvStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FILE = path.resolve(__dirname, '..', '.reviews.json');
+const FILE = '.reviews.json';                          // kv key (Supabase in prod, local file in dev)
 export const UPLOAD_DIR = path.resolve(__dirname, '..', '.review-uploads');
 
 export type Review = {
@@ -46,7 +47,7 @@ let cache: Review[] | null = null;
 async function read(): Promise<Review[]> {
   if (cache) return cache;
   try {
-    cache = JSON.parse(await fs.readFile(FILE, 'utf8')) as Review[];
+    cache = JSON.parse(await fileStore.readFile(FILE)) as Review[];
   } catch {
     cache = [];
   }
@@ -55,7 +56,7 @@ async function read(): Promise<Review[]> {
 
 async function write(list: Review[]): Promise<void> {
   cache = list;
-  await fs.writeFile(FILE, JSON.stringify(list, null, 2), 'utf8');
+  await fileStore.writeFile(FILE, JSON.stringify(list, null, 2));
 }
 
 /** All reviews, newest first. */
@@ -80,11 +81,18 @@ export async function addReview(p: Record<string, unknown>): Promise<Review> {
   if (dataUrl.startsWith('data:image/')) {
     const m = dataUrl.match(/^data:(image\/[\w.+-]+);base64,(.*)$/);
     if (m) {
-      await fs.mkdir(UPLOAD_DIR, { recursive: true });
-      const ext = EXT[m[1]] || 'png';
-      const file = `${id}.${ext}`;
-      await fs.writeFile(path.join(UPLOAD_DIR, file), Buffer.from(m[2], 'base64'));
-      screenshot = `/api/review-uploads/${file}`;
+      // Screenshots are written to local disk. On a read-only serverless
+      // filesystem this throws - in that case we keep the review text and skip
+      // the image rather than failing the whole request.
+      try {
+        await fs.mkdir(UPLOAD_DIR, { recursive: true });
+        const ext = EXT[m[1]] || 'png';
+        const file = `${id}.${ext}`;
+        await fs.writeFile(path.join(UPLOAD_DIR, file), Buffer.from(m[2], 'base64'));
+        screenshot = `/api/review-uploads/${file}`;
+      } catch {
+        /* serverless: no persistent disk for uploads */
+      }
     }
   }
 

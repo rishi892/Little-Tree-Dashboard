@@ -425,8 +425,12 @@ app.get('/api/assistant/changes', async (req, res, next) => {
 // Background watcher: refresh the snapshot every 30 min even with no user
 // activity, so the bot's change-history (and "what changed") stays current on
 // its own. Seed once shortly after startup.
-setInterval(() => { void buildSnapshot(true).catch(() => { /* best-effort */ }); }, 30 * 60 * 1000);
-setTimeout(() => { void buildSnapshot(true).catch(() => { /* best-effort */ }); }, 60 * 1000);
+// Long-running watchers only make sense on a persistent host (local / Node
+// server). On serverless (Vercel) there's no background process, so skip them.
+if (!process.env.VERCEL) {
+ setInterval(() => { void buildSnapshot(true).catch(() => { /* best-effort */ }); }, 30 * 60 * 1000);
+ setTimeout(() => { void buildSnapshot(true).catch(() => { /* best-effort */ }); }, 60 * 1000);
+}
 
 // Cashflow manual overrides (CC utilisation per week + mode toggle).
 app.get('/api/cashflow-overrides', async (_req, res, next) => {
@@ -1437,7 +1441,7 @@ if (fs.existsSync(FRONTEND_DIST)) {
  console.log('[static] no dist/ found - running API only (frontend served by Vite dev server)');
 }
 
-app.listen(config.port, () => {
+if (!process.env.VERCEL) app.listen(config.port, () => {
  console.log(`Cashflow LT server listening on http://localhost:${config.port}`);
  console.log(`QBO environment: ${config.qbo.environment}`);
  console.log(`Connect at: http://localhost:${config.port}/auth/connect`);
@@ -1483,3 +1487,6 @@ app.listen(config.port, () => {
  setInterval(() => { void prewarmQbCaches(); }, PREFETCH_QB_INTERVAL_MS);
  }, 10_000);
 });
+
+// Vercel serverless imports this Express app as the request handler.
+export default app;

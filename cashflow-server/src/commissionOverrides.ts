@@ -8,12 +8,9 @@
  * Stored on disk in .commission-overrides.json so they survive restart.
  */
 
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileStore as fs } from './kvStore.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FILE = path.resolve(__dirname, '..', '.commission-overrides.json');
+const FILE = '.commission-overrides.json';
 
 export type OverrideType = 'NEW' | 'OLD' | 'WHITELABEL';
 

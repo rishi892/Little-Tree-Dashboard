@@ -8,12 +8,9 @@
  * Storage: server/.assistant-history.json - durable, survives restarts.
  */
 
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileStore as fs } from './kvStore.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FILE = path.resolve(__dirname, '..', '.assistant-history.json');
+const FILE = '.assistant-history.json';
 
 const MAX_RECORDS = 400;
 const MIN_GAP_MS = 20 * 60 * 1000; // record at most once every 20 minutes

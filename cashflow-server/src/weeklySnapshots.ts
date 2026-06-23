@@ -26,12 +26,9 @@
  * Storage: server/.weekly-snapshots.json - durable, survives restarts.
  */
 
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileStore as fs } from './kvStore.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SNAPSHOTS_FILE = path.resolve(__dirname, '..', '.weekly-snapshots.json');
+const SNAPSHOTS_FILE = '.weekly-snapshots.json';
 
 export type SnapshotLineItem = {
   label: string;

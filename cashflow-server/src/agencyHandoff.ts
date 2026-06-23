@@ -4,12 +4,9 @@
  * sent. Stored in our own system (no external sheet).
  *   Storage: cashflow-server/.agency-handoffs.json   (keyed by invoice #)
  */
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileStore as fs } from './kvStore.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FILE = path.resolve(__dirname, '..', '.agency-handoffs.json');
+const FILE = '.agency-handoffs.json';
 
 export type Handoff = {
   invNo: string;
