@@ -481,6 +481,7 @@ app.get('/api/past-weeks-grid', async (_req, res, next) => {
   const { listSnapshots } = await import('./weeklySnapshots.js');
   const { getWeekActuals } = await import('./snapshotActuals.js');
   const { getWeekExpensesByLine, getExpectedInflowByWeek } = await import('./weeklyActuals.js');
+  const { getValidAccessToken } = await import('./oauth.js');
   const ymd = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
   const addDaysUtc = (d: Date, n: number) => { const r = new Date(d); r.setUTCDate(d.getUTCDate() + n); return r; };
   const todayD = new Date();
@@ -489,36 +490,43 @@ app.get('/api/past-weeks-grid', async (_req, res, next) => {
   // Past view starts at the FIRST MONDAY OF MAY 2026 (per user) and runs to the
   // most recently CLOSED week - not a rolling 13-back window. Grows each week.
   const may1 = new Date(Date.UTC(2026, 4, 1));
-  const dow = may1.getUTCDay();                       // Sun=0..Sat=6
-  const START = addDaysUtc(may1, dow === 1 ? 0 : (8 - dow) % 7); // first Monday on/after May 1
+  const dow = may1.getUTCDay();
+  const START = addDaysUtc(may1, dow === 1 ? 0 : (8 - dow) % 7);
   const mondays: Array<{ monday: string; weekEnd: string }> = [];
   for (let i = 0; i < 30; i++) {
    const mon = addDaysUtc(START, i * 7);
    const sun = addDaysUtc(mon, 6);
-   if (ymd(sun) >= todayStr) break;                   // only fully-closed weeks
+   if (ymd(sun) >= todayStr) break;
    mondays.push({ monday: ymd(mon), weekEnd: ymd(sun) });
   }
-  mondays.reverse();                                  // newest week first (Wk -1)
+  mondays.reverse();
 
   const snaps = await listSnapshots();
   const snapByMon = new Map(snaps.map((s) => [s.monday, s]));
   const expected = await getExpectedInflowByWeek(mondays.map((m) => ({ start: m.monday, end: m.weekEnd })));
 
-  const items = await Promise.all(mondays.map(async (m, i) => {
+  // Snapshot + sheet actuals in parallel (no QB involved).
+  const items: Array<Record<string, unknown>> = await Promise.all(mondays.map(async (m, i) => {
    let actuals = null;
    try { actuals = await getWeekActuals(m.monday, m.weekEnd); } catch { actuals = null; }
-   let qbExpenses = null;
-   try { qbExpenses = await getWeekExpensesByLine(m.monday, m.weekEnd); } catch { qbExpenses = null; }
    return {
-    monday: m.monday,
-    weekEnd: m.weekEnd,
-    weekClosed: true,
+    monday: m.monday, weekEnd: m.weekEnd, weekClosed: true,
     snapshot: snapByMon.get(m.monday) ?? null,
-    actuals,
-    qbExpenses,
+    actuals, qbExpenses: null,
     expectedInflow: expected[i] ?? null,
    };
   }));
+
+  // QB per-category expenses: one token, sequential per week so we don't fire
+  // N concurrent P&L reports (QB rate-limits reports). Cached 24h per week.
+  let tok: { accessToken: string; realmId: string } | null = null;
+  try { tok = await getValidAccessToken(); } catch { tok = null; }
+  if (tok) {
+   for (const it of items) {
+    try { it.qbExpenses = await getWeekExpensesByLine(it.monday as string, it.weekEnd as string, tok); }
+    catch (e) { it.qbExpenses = null; it.qbErr = e instanceof Error ? e.message : String(e); }
+   }
+  }
   res.json({ count: items.length, items });
  } catch (err) { next(err); }
 });
