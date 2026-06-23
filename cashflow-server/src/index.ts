@@ -366,28 +366,14 @@ app.get('/api/cashflow-13week', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
  const direction = req.query.direction === 'past' ? 'past' : 'future';
- const cache = direction === 'past' ? cfPastCache : cfCache;
- if (!force && cache && Date.now() - cache.at < CF_TTL_MS) {
- res.json({ cached: true, direction, ...cache.data });
- return;
- }
- if (direction === 'past') {
- if (!cfPastInFlight) {
- cfPastInFlight = getCashflow13Week({ direction: 'past' })
- .then((data) => { cfPastCache = { at: Date.now(), data }; return data; })
- .finally(() => { cfPastInFlight = null; });
- }
- const data = await cfPastInFlight;
- res.json({ cached: false, direction, ...data });
- } else {
- if (!cfInFlight) {
- cfInFlight = getCashflow13Week()
- .then((data) => { cfCache = { at: Date.now(), data }; return data; })
- .finally(() => { cfInFlight = null; });
- }
- const data = await cfInFlight;
- res.json({ cached: false, direction, ...data });
- }
+ const { data, cached } = await withDurableCache(
+ `cashflow-13week:${direction}`,
+ 5 * 60 * 1000, // 5 min: serve instantly, refresh in background
+ () => getCashflow13Week(direction === 'past' ? { direction: 'past' } : undefined),
+ (d) => Array.isArray((d as { weeks?: unknown[] }).weeks) && (d as { weeks: unknown[] }).weeks.length > 0,
+ force,
+ );
+ res.json({ cached, direction, ...data });
  } catch (err) {
  next(err);
  }
@@ -722,12 +708,22 @@ app.get('/api/sales-forecast', async (_req, res, next) => {
  } catch (err) { next(err); }
 });
 
-// Current Position snapshot - moderate cost (3 QB queries). Cache 5 min.
+// A result computed while QB was throttled/down carries a failure warning -
+// never cache it (it would poison the cache with degraded data and the page can
+// break on it). Informational warnings (e.g. "excluded intercompany account")
+// are fine and still cacheable.
+const noBadWarning = (warnings?: unknown): boolean => {
+  if (!Array.isArray(warnings)) return true;
+  return !warnings.some((w) => typeof w === 'string'
+    && /throttl|\b429\b|not connected|invalid_grant|query failed|temporarily unavailable|ThrottleExceeded/i.test(w));
+};
+
+// Current Position snapshot - moderate cost (3 QB queries). Cache 30 min.
 const CP_TTL_MS = 30 * 60 * 1000;
-// Durable-cached: if QB is throttled/down, serve the last good position rather
-// than 500-ing the page.
+// Durable-cached: serve the last GOOD position if QB is throttled/down, and
+// never cache a throttle-degraded result.
 const getCurrentPositionCached = (force = false) =>
-  withDurableCache('current-position', CP_TTL_MS, getCurrentPosition, () => true, force);
+  withDurableCache('current-position', CP_TTL_MS, getCurrentPosition, (d) => noBadWarning(d.warnings), force);
 
 app.get('/api/current-position', async (req, res, next) => {
  try {
@@ -774,7 +770,7 @@ const LINKED_TTL_MS = 30 * 60 * 1000;
 // A result is "good" (worth caching) only when QB actually returned accounts and
 // there's no auth warning. A degraded result never overwrites the last good one.
 const isGoodLinked = (d: LinkedBalances): boolean =>
-  !d.warnings.some((w) => /not connected/i.test(w)) &&
+  noBadWarning(d.warnings) &&
   d.qb.cashAccounts.length + d.qb.creditCards.length > 0;
 const getLinkedBalancesCached = (force = false) =>
   withDurableCache('linked-balances', LINKED_TTL_MS, getLinkedBalances, isGoodLinked, force);
