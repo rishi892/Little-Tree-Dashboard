@@ -21,6 +21,12 @@ let cache: StoredTokens | null = null;
 let cacheExpiresAt = 0;
 const CACHE_TTL_MS = 2_000;
 
+// Last token we successfully read/saved. Survives the short cache TTL and is
+// used to tell a TRANSIENT Supabase read blip (return last-known-good, stay
+// "connected") apart from a GENUINE disconnect (clearTokens nulls this, so we
+// correctly report "not connected"). Stops the connection from flapping.
+let lastGood: StoredTokens | null = null;
+
 // Validate the shape of whatever we loaded from disk. A partially-written
 // or hand-edited token file used to slip through as null fields and tank
 // the next QB call with a cryptic 401. Now we reject early and let the
@@ -51,11 +57,16 @@ export async function loadTokens(): Promise<StoredTokens | null> {
    expiresAt: Number(row.expires_at),
  };
  if (!isValidTokenShape(parsed)) {
+   // No row came back. If we still hold a last-known-good token, this is almost
+   // certainly a transient Supabase hiccup (not a real disconnect, which would
+   // have cleared lastGood) → keep reporting connected instead of flapping.
+   if (!parsed && lastGood) return lastGood;
    if (parsed) console.warn('[tokenStore] stored tokens are malformed - ignoring');
    cache = null;
    return null;
  }
  cache = parsed;
+ lastGood = parsed;
  cacheExpiresAt = Date.now() + CACHE_TTL_MS;
  return cache;
 }
@@ -66,6 +77,7 @@ export async function saveTokens(tokens: StoredTokens): Promise<void> {
    throw new Error('[tokenStore] refused to save malformed token payload');
  }
  cache = tokens;
+ lastGood = tokens;
  cacheExpiresAt = Date.now() + CACHE_TTL_MS;
  await dbUpsert('qb_tokens', {
    realm_id: tokens.realmId,
@@ -94,6 +106,7 @@ export async function acquireRefreshLock(realmId: string): Promise<boolean> {
 
 export async function clearTokens(): Promise<void> {
  cache = null;
+ lastGood = null; // genuine disconnect → forget the last-known-good token
  cacheExpiresAt = 0;
  await dbDelete('qb_tokens', 'realm_id=not.is.null');
 }

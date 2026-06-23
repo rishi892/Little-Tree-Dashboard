@@ -77,41 +77,45 @@ export async function getValidAccessToken(): Promise<StoredTokens> {
  const tokens = await loadTokens();
  if (!tokens) throw new Error('Not connected to QuickBooks. Visit /auth/connect first.');
 
- // Still well within expiry → return current tokens.
- if (Date.now() < tokens.expiresAt - REFRESH_LEAD_MS) {
- return tokens;
+ const now = Date.now();
+ // Comfortably valid → use as-is.
+ if (now < tokens.expiresAt - REFRESH_LEAD_MS) return tokens;
+
+ // We're inside the 5-minute pre-expiry window. Because we refresh EARLY, the
+ // current access token is almost always still valid here - so the golden rule
+ // is: never block a request waiting on a refresh (that risks the serverless
+ // function timeout and makes QB look "disconnected"). Exactly one worker does
+ // the refresh; everyone else keeps using the still-valid token.
+ const stillUsable = now < tokens.expiresAt - 20_000; // 20s safety margin
+
+ // A refresh is already running in THIS instance.
+ if (refreshInFlight) return stillUsable ? tokens : refreshInFlight;
+
+ // Claim the cross-instance lock so only ONE worker calls Intuit per rotation
+ // (concurrent refreshes trip Intuit's token-reuse detection and kill the
+ // whole connection).
+ const won = await acquireRefreshLock(tokens.realmId);
+ if (!won) {
+ // Another worker holds the lock. Use the still-valid token immediately; only
+ // if it's genuinely on the edge of expiry do we briefly wait for the fresh one.
+ if (stillUsable) return tokens;
+ const fresh = await waitForFreshToken(tokens.expiresAt, 6_000);
+ return fresh ?? tokens;
  }
 
- // Another refresh is already in flight in THIS instance → share its result.
- if (refreshInFlight) return refreshInFlight;
-
- refreshInFlight = doRefresh(tokens).finally(() => {
- refreshInFlight = null;
- });
+ // We won the lock → perform the single refresh and persist it.
+ refreshInFlight = performIntuitRefresh(tokens).finally(() => { refreshInFlight = null; });
+ // If our token is still usable we could return it now, but we await here so the
+ // new token is guaranteed saved before this serverless invocation freezes.
  return refreshInFlight;
 }
 
-/** Coordinate the refresh across all instances, then perform it. */
-async function doRefresh(current: StoredTokens): Promise<StoredTokens> {
- const won = await acquireRefreshLock(current.realmId);
- if (!won) {
- // Another instance is refreshing right now. Wait for it to write a fresh
- // token rather than racing Intuit (which would trip reuse-detection).
- const fresh = await waitForFreshToken(current.expiresAt);
- if (fresh) return fresh;
- // Holder hung/crashed and the lock TTL has elapsed → claim it and do it
- // ourselves as a last resort.
- await acquireRefreshLock(current.realmId);
- }
- return performIntuitRefresh(current);
-}
-
 /** Poll the DB until a token newer than `staleExpiry` appears (someone else
- * refreshed) or we give up. */
-async function waitForFreshToken(staleExpiry: number): Promise<StoredTokens | null> {
- const deadline = Date.now() + 14_000;
+ * refreshed) or we give up. `maxMs` is kept well under the function timeout. */
+async function waitForFreshToken(staleExpiry: number, maxMs = 6_000): Promise<StoredTokens | null> {
+ const deadline = Date.now() + maxMs;
  while (Date.now() < deadline) {
- await sleep(400);
+ await sleep(350);
  const t = await loadTokensFresh();
  if (t && t.expiresAt > staleExpiry) return t;
  }
