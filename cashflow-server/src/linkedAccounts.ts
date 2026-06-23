@@ -148,6 +148,10 @@ function toTillerLine(a: TillerAccount, schedule: CcStatementRow[] = []): Tiller
  };
 }
 
+// Last successful QB account pull. On a transient (non-auth) failure we reuse
+// this so the QB column doesn't blink empty between good polls.
+let lastGoodQb: { bank: QbAccount[]; cc: QbAccount[]; realmId: string } | null = null;
+
 export async function getLinkedBalances(): Promise<LinkedBalances> {
  const warnings: string[] = [];
  let realmId: string | null = null;
@@ -162,8 +166,25 @@ export async function getLinkedBalances(): Promise<LinkedBalances> {
  ]);
  qbBank = bank;
  qbCC = cc;
+ lastGoodQb = { bank, cc, realmId };
  } catch (e) {
- warnings.push(`QB not connected (${e instanceof Error ? e.message : '?'}). QB column will be empty.`);
+ const msg = e instanceof Error ? e.message : String(e);
+ // Only call it "not connected" for a GENUINE auth failure (missing token /
+ // 401 / invalid_grant). A transient timeout or 5xx must NOT say "not
+ // connected" - the frontend would flip to the "Connect QuickBooks" screen and
+ // flicker on the next good poll. The token is fine; this just retries.
+ const isAuth = /not connected|auth\/connect|unauthor|\b401\b|invalid[_ ]?grant|refresh token|authenticationfailed|\b3200\b/i.test(msg);
+ if (isAuth) {
+ warnings.push(`QB not connected (${msg}). QB column will be empty.`);
+ } else if (lastGoodQb) {
+ // Transient: serve the last good QB data so nothing blinks.
+ qbBank = lastGoodQb.bank;
+ qbCC = lastGoodQb.cc;
+ realmId = lastGoodQb.realmId;
+ warnings.push(`QB data temporarily unavailable; showing last values, retrying.`);
+ } else {
+ warnings.push(`QB data temporarily unavailable; retrying.`);
+ }
  }
 
  const [tiller, ccSchedule] = await Promise.all([

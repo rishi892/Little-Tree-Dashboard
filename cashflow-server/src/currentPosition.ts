@@ -190,10 +190,13 @@ export async function getCurrentPosition(): Promise<CurrentPosition> {
  realmId = tok.realmId;
  allAccounts = await queryAllAccounts();
  } catch (e) {
- throw new Error(
- `Not connected to QuickBooks (${e instanceof Error ? e.message : '?'}). ` +
- `Visit /auth/connect to authorize.`,
- );
+ const msg = e instanceof Error ? e.message : String(e);
+ // Distinguish a genuine auth failure (show "reconnect") from a transient
+ // timeout/5xx (don't - it would flicker the connect screen on the next good poll).
+ const isAuth = /not connected|auth\/connect|unauthor|\b401\b|invalid[_ ]?grant|refresh token|authenticationfailed|\b3200\b/i.test(msg);
+ throw new Error(isAuth
+ ? `Not connected to QuickBooks (${msg}). Visit /auth/connect to authorize.`
+ : `QuickBooks data temporarily unavailable (${msg}). Please retry.`);
  }
 
  // 1. CASH ON HAND - all Bank-type accounts EXCEPT intercompany/PureX (those
