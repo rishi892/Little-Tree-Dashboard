@@ -165,22 +165,23 @@ const _ACCT_CACHE_TTL_MS = 60 * 60 * 1000;
 
 export function invalidateAccountTransactionsCache(): void { _acctCache.clear(); }
 
-export async function getAccountTransactions(accountName: string): Promise<AccountTransactionsResult> {
- const cached = _acctCache.get(accountName);
+export async function getAccountTransactions(accountName: string, includeJournalEntries = false): Promise<AccountTransactionsResult> {
+ const cacheKey = `${accountName}|${includeJournalEntries ? 'je' : 'nje'}`;
+ const cached = _acctCache.get(cacheKey);
  if (cached && Date.now() - cached.at < _ACCT_CACHE_TTL_MS) return cached.data;
- const inFlight = _acctInFlight.get(accountName);
+ const inFlight = _acctInFlight.get(cacheKey);
  if (inFlight) return inFlight;
  const promise = (async () => {
- try { return await _getAccountTransactionsUncached(accountName); }
- finally { _acctInFlight.delete(accountName); }
+ try { return await _getAccountTransactionsUncached(accountName, includeJournalEntries); }
+ finally { _acctInFlight.delete(cacheKey); }
  })();
- _acctInFlight.set(accountName, promise);
+ _acctInFlight.set(cacheKey, promise);
  const data = await promise;
- if (data.total > 0 || data.transactions.length > 0) _acctCache.set(accountName, { at: Date.now(), data });
+ if (data.total > 0 || data.transactions.length > 0) _acctCache.set(cacheKey, { at: Date.now(), data });
  return data;
 }
 
-async function _getAccountTransactionsUncached(accountName: string): Promise<AccountTransactionsResult> {
+async function _getAccountTransactionsUncached(accountName: string, includeJournalEntries = false): Promise<AccountTransactionsResult> {
  const tok = await getValidAccessToken();
  const [accounts, billPayments] = await Promise.all([
  qboQuery<Account>('select * from Account', tok.accessToken, tok.realmId, 'Account'),
@@ -227,8 +228,12 @@ async function _getAccountTransactionsUncached(accountName: string): Promise<Acc
 
  for (const r of rows) {
  if (r.amount <= 0) continue;
- // Skip JEs and inventory adjustments - accounting reclasses, not cash flow.
- if (/journal entry|inventory (qty )?adjust|transfer/i.test(r.txnType)) continue;
+ // Always skip pure bank-to-bank transfers + non-dollar inventory qty adjusts.
+ if (/inventory (qty )?adjust|^transfer$/i.test(r.txnType)) continue;
+ // Journal entries: hidden from the mapped-expense rollup (cash flow only) but
+ // SHOWN in the per-account drill-down so it ties out to the P&L (e.g. the $4k
+ // Professional Services JE the user couldn't find).
+ if (!includeJournalEntries && /journal entry/i.test(r.txnType)) continue;
 
  let paidBy: 'PureX' | 'Moysh' = 'Moysh';
  let sourceBankName = r.splitAccount;

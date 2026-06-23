@@ -839,7 +839,8 @@ app.get('/api/account-transactions', async (req, res, next) => {
  }
  let p = acctTxnInFlight.get(account);
  if (!p) {
- p = getAccountTransactions(account)
+ // include journal entries in the drill-down so it ties out to the P&L
+ p = getAccountTransactions(account, true)
  .then((data) => { acctTxnCache.set(account, { at: Date.now(), data }); return data; })
  .finally(() => { acctTxnInFlight.delete(account); });
  acctTxnInFlight.set(account, p);
