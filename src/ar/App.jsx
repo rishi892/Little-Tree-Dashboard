@@ -52,6 +52,13 @@ export default function App() {
   // (sessionStorage flag still set), drop them straight into the dashboard
   // instead of asking for the same credentials again.
   const handleArChosen = () => {
+    // DEV-ONLY: skip the AR login on localhost / `vite dev`. import.meta.env.DEV
+    // is false in production builds, so this branch never ships to cfovaani.com.
+    if (import.meta.env.DEV) {
+      try { sessionStorage.setItem('lt_auth_ok', '1'); sessionStorage.setItem('lt_role', 'full'); } catch { /* ignore */ }
+      setStage('dashboard')
+      return
+    }
     if (sessionStorage.getItem('lt_auth_ok') === '1') {
       setStage('dashboard')
     } else {
@@ -67,7 +74,12 @@ export default function App() {
   return (
     <DashboardChooser
       onChooseAr={handleArChosen}
-      onChooseCashflow={() => setStage('login-cashflow')}
+      onChooseCashflow={() => {
+        // DEV-ONLY: skip the Cashflow login on localhost (the cashflow app also
+        // bypasses its gate in dev). Never reached in production builds.
+        if (import.meta.env.DEV) { window.location.href = '/cashflow.html?direct=1'; return; }
+        setStage('login-cashflow');
+      }}
     />
   )
 }

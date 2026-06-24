@@ -328,7 +328,7 @@ export type CashflowSource = 'live' | 'computed' | 'none';
 export type CashflowStatus = 'HEALTHY' | 'TIGHT' | 'CRITICAL';
 export type CashflowWeek = { label: string; start: string; end: string };
 export type CashflowBreakdownItem = { label: string; amount: number; sub?: string };
-export type CashflowLine = { label: string; source: CashflowSource; note?: string; values: number[]; breakdown?: CashflowBreakdownItem[] };
+export type CashflowLine = { label: string; source: CashflowSource; note?: string; values: number[]; breakdown?: CashflowBreakdownItem[]; displayOnly?: boolean };
 
 export type ActivityTier = 'active' | 'cooling' | 'dormant' | 'churned';
 export type SalesForecastBrand = {
@@ -460,6 +460,8 @@ export type SalesForecastResult = {
  monthlyForecast: Array<{ ym: string; amount: number }>;
  totalForecastedSales: number;
  totalProjectedCash: number;
+ /** Share of non-Gelato sales $ collected the same week invoiced (2024+ history). */
+ sameWeekRate: number;
  // 3-bucket projection (each bucket runs the same model on its own slice)
  buckets: {
   wholesale: BucketForecast;
@@ -487,6 +489,7 @@ export type BucketForecast = {
  weeklyInflow: number[];
  weeklyInflowBest: number[];
  weeklyInflowWorst: number[];
+ weeklyGross: number[];
  scenarioTotals: {
   base: { invoiced: number; cash: number };
   best: { invoiced: number; cash: number };
@@ -642,7 +645,9 @@ export type WeekActuals = {
  txnCount: number;
  arActuals: {
  gelato: { amount: number; invoiceCount: number };
- nonGelato: { amount: number; invoiceCount: number };
+ // sameWeek = invoiced & paid same week (immediate -> Projected AR);
+ // lagged = paid now but invoiced earlier (lag -> Little Tree AR).
+ nonGelato: { amount: number; invoiceCount: number; sameWeek?: number; lagged?: number };
  total: number;
  };
  salesInvoiced: {

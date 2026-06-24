@@ -8,6 +8,7 @@ import { Sidebar } from './components/Sidebar';
 import { ExpensesHub } from './components/ExpensesHub';
 import { CashflowHub } from './components/CashflowHub';
 import { ReportsHub } from './components/ReportsHub';
+import { SalesHub } from './components/SalesHub';
 import { Upflow } from './components/Upflow';
 import { CfoCopilot } from './components/CfoCopilot';
 import { onCfoNav } from './cfoNav';
@@ -17,7 +18,7 @@ import { onCfoNav } from './cfoNav';
 // tab is closed - the CFO password is required again on every fresh visit.
 const AR_SHELL_AUTH_FLAG = 'lt-cfo-auth';
 
-export type ViewKey = 'cashflow' | 'expenses' | 'reports' | 'upflow';
+export type ViewKey = 'cashflow' | 'expenses' | 'sales' | 'reports' | 'upflow';
 
 
 type AuthState = 'checking' | 'allowed' | 'redirecting';
@@ -36,6 +37,11 @@ export default function App() {
  const [authState, setAuthState] = useState<AuthState>('checking');
 
  useEffect(() => {
+   // DEV-ONLY login bypass: on localhost / `vite dev`, skip the gate entirely.
+   // import.meta.env.DEV is true only during `npm run dev`; a production
+   // `vite build` compiles this branch out, so it can never ship to cfovaani.com.
+   if (import.meta.env.DEV) { setAuthState('allowed'); return; }
+
    const url = new URL(window.location.href);
    const direct = url.searchParams.get('direct') === '1';
 
@@ -190,6 +196,7 @@ function Dashboard({ onSignOut }: { onSignOut: () => void }) {
  />
  </div>
  <div style={{ display: view === 'expenses' ? 'block' : 'none' }}><ExpensesHub /></div>
+ <div style={{ display: view === 'sales' ? 'block' : 'none' }}>{view === 'sales' && <SalesHub />}</div>
  <div style={{ display: view === 'reports' ? 'block' : 'none' }}><ReportsHub /></div>
  <div style={{ display: view === 'upflow' ? 'block' : 'none' }}>{view === 'upflow' && <Upflow />}</div>
 

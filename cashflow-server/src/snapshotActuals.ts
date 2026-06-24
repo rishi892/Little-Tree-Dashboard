@@ -68,7 +68,11 @@ export type WeekActuals = {
   *  in [weekStart, weekEnd]. */
  arActuals: {
   gelato: { amount: number; invoiceCount: number };
-  nonGelato: { amount: number; invoiceCount: number };
+  // sameWeek = invoiced AND paid in the SAME week (immediate cash from that week's
+  // new sales -> Actual "Projected AR"). lagged = paid this week but invoiced
+  // earlier (older sale collecting now -> Actual "Little Tree AR"). sameWeek +
+  // lagged = amount.
+  nonGelato: { amount: number; invoiceCount: number; sameWeek: number; lagged: number };
   total: number;
  };
  /** Sales INVOICED in this week (issue date inside the range). */
@@ -102,14 +106,36 @@ function txnInWindow(txn: TillerTxn, start: string, end: string): boolean {
  return txn.date >= start && txn.date <= end;
 }
 
+const ymdUtc = (d: Date): string =>
+ `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+
+/** invoiceNumber (lowercased) -> authoritative invoice date taken from the
+ *  Invoice Tracker, which mirrors the ACTUAL QuickBooks bill date (verified:
+ *  the Tracker's "Date" column matches the date embedded in each bill's Intuit
+ *  share link). The LT Financials *sales* sheet date is occasionally off by ~1
+ *  day; when an invoice number matches, we trust the Tracker/bill date so the
+ *  weekly "who invoiced what, when" buckets line up with the real bills. */
+async function getBillInvoiceDates(): Promise<Map<string, Date>> {
+ const tr = await getInvoiceTracker();
+ const m = new Map<string, Date>();
+ for (const inv of tr.invoices) {
+  const key = inv.invoiceNumber.trim().toLowerCase();
+  if (key && inv.invoiceDate) m.set(key, inv.invoiceDate);
+ }
+ return m;
+}
+
 /** Per-channel AR actuals: dollars actually collected in [weekStart, weekEnd]
  *  per LT Financials (the company source-of-truth for invoice + payment data).
  *  Sums `paid` for any invoice whose paidDate falls in the week. Gelato bucket
  *  rarely lands here since Gelato sales come from a separate sheet - included
- *  defensively in case any rows are tagged Gelato. */
+ *  defensively in case any rows are tagged Gelato.
+ *  Invoice date for the same-week/lagged split is taken from the Invoice Tracker
+ *  (bill date) when the invoice number matches - see getBillInvoiceDates. */
 export async function getArActualsForWeek(weekStart: string, weekEnd: string): Promise<WeekActuals['arActuals']> {
- const ltFin = await getLtFinancialsSales();
+ const [ltFin, billDates] = await Promise.all([getLtFinancialsSales(), getBillInvoiceDates()]);
  let gelatoAmt = 0, gelatoCount = 0, nonGelatoAmt = 0, nonGelatoCount = 0;
+ let sameWeekAmt = 0, laggedAmt = 0;  // non-Gelato split by how fast the sale collected
  for (const inv of ltFin.invoices) {
   if (inv.paid <= 0) continue;
   if (!inv.paidDate) continue;
@@ -117,13 +143,50 @@ export async function getArActualsForWeek(weekStart: string, weekEnd: string): P
   if (pd < weekStart || pd > weekEnd) continue;
   const isGelato = inv.channel === 'Gelato';
   if (isGelato) { gelatoAmt += inv.paid; gelatoCount++; }
-  else { nonGelatoAmt += inv.paid; nonGelatoCount++; }
+  else {
+   nonGelatoAmt += inv.paid; nonGelatoCount++;
+   // Was this sale invoiced in the same week it got paid? If yes -> immediate
+   // (Collected from sales). If invoiced earlier -> lag collection (Past AR).
+   // Use the Invoice Tracker (bill) date when the invoice number matches.
+   const billDate = billDates.get(inv.invoiceNumber.trim().toLowerCase()) ?? inv.invoiceDate;
+   const id = ymdUtc(billDate);
+   if (id >= weekStart && id <= weekEnd) sameWeekAmt += inv.paid;
+   else laggedAmt += inv.paid;
+  }
  }
  return {
   gelato: { amount: +gelatoAmt.toFixed(2), invoiceCount: gelatoCount },
-  nonGelato: { amount: +nonGelatoAmt.toFixed(2), invoiceCount: nonGelatoCount },
+  nonGelato: {
+   amount: +nonGelatoAmt.toFixed(2), invoiceCount: nonGelatoCount,
+   sameWeek: +sameWeekAmt.toFixed(2), lagged: +laggedAmt.toFixed(2),
+  },
   total: +(gelatoAmt + nonGelatoAmt).toFixed(2),
  };
+}
+
+/** Historical share of non-Gelato dollars collected in the SAME (Monday-anchored)
+ *  week the invoice was issued - i.e. "sale hua aur usi week paisa aa gaya". Used
+ *  to split BUDGET new-sales collections into immediate (Projected AR) vs lagged
+ *  (Little Tree AR), using the exact same definition the Actual tab uses, so the
+ *  two tabs measure the same thing. Returns a fraction 0..1. */
+export async function getSameWeekCollectionRate(): Promise<number> {
+ const [ltFin, billDates] = await Promise.all([getLtFinancialsSales(), getBillInvoiceDates()]);
+ const mondayKey = (d: Date): string => {
+  const dow = d.getUTCDay();              // 0=Sun..6=Sat
+  const back = dow === 0 ? 6 : dow - 1;   // days back to Monday
+  const m = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - back));
+  return `${m.getUTCFullYear()}-${String(m.getUTCMonth() + 1).padStart(2, '0')}-${String(m.getUTCDate()).padStart(2, '0')}`;
+ };
+ let same = 0, total = 0;
+ for (const inv of ltFin.invoices) {
+  if (inv.paid <= 0 || !inv.paidDate) continue;
+  if (inv.channel === 'Gelato') continue;     // non-Gelato only (Gelato is Net 97)
+  total += inv.paid;
+  // Invoice date from the Tracker (bill) when the invoice number matches.
+  const billDate = billDates.get(inv.invoiceNumber.trim().toLowerCase()) ?? inv.invoiceDate;
+  if (mondayKey(billDate) === mondayKey(inv.paidDate)) same += inv.paid;
+ }
+ return total > 0 ? same / total : 0;
 }
 
 /** Simple direct check - the dashboard only cares about Gelato vs Non-Gelato,
@@ -343,15 +406,18 @@ export async function getOpenArAsOf(asOfDate: string): Promise<{ amount: number;
 
 /** Per-channel sales INVOICED in [weekStart, weekEnd] from LT Financials -
  *  the company source-of-truth invoice ledger (sales projection also reads
- *  from here, so weekly actuals reconcile against the same source). */
+ *  from here, so weekly actuals reconcile against the same source).
+ *  The invoice date that decides the week is taken from the Invoice Tracker
+ *  (bill date) when the invoice number matches - see getBillInvoiceDates. */
 export async function getSalesInvoicedForWeek(weekStart: string, weekEnd: string): Promise<WeekActuals['salesInvoiced']> {
- const ltFin = await getLtFinancialsSales();
+ const [ltFin, billDates] = await Promise.all([getLtFinancialsSales(), getBillInvoiceDates()]);
  const start = new Date(weekStart + 'T00:00:00Z').getTime();
  const end = new Date(weekEnd + 'T23:59:59Z').getTime();
  let gelatoAmt = 0, gelatoCount = 0, nonGelatoAmt = 0, nonGelatoCount = 0;
  for (const inv of ltFin.invoices) {
   if (inv.amount <= 0) continue;
-  const t = inv.invoiceDate.getTime();
+  const billDate = billDates.get(inv.invoiceNumber.trim().toLowerCase()) ?? inv.invoiceDate;
+  const t = billDate.getTime();
   if (t < start || t > end) continue;
   const isGelato = inv.channel === 'Gelato';
   if (isGelato) { gelatoAmt += inv.amount; gelatoCount++; }

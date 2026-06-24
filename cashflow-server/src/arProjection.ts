@@ -164,7 +164,7 @@ function curveToPoints(raw: RawCurve): LagCurvePoint[] {
 
 // --- Main ---
 
-export async function getArProjection(weeks: Week[]): Promise<ArProjectionResult> {
+export async function getArProjection(weeks: Week[], asOf?: Date): Promise<ArProjectionResult> {
  const warnings: string[] = [];
  const arByWeek = new Array(weeks.length).fill(0);
  const buckets = { overdueWk1: 0, openInWindow: 0, openAfterWindow: 0, futureProjected: 0 };
@@ -189,6 +189,22 @@ export async function getArProjection(weeks: Week[]): Promise<ArProjectionResult
  arByWeek, buckets, channelStats: [], globalCurve: [], globalCollectionRate: 0,
  placements: [], globalAvgCollectionDays: 30, dailyRunRate: 0,
  projectedCollectibilityRate: 1, warnings,
+ };
+ }
+
+ if (asOf) {
+ // As-of back-test: keep only invoices issued by the anchor, and undo any
+ // payment that happened AFTER it (so each invoice's open balance + the lag
+ // curve reflect only what was known on that date).
+ const cut = asOf.getTime();
+ tracker = {
+ ...tracker,
+ invoices: tracker.invoices
+ .filter((inv) => inv.invoiceDate.getTime() <= cut)
+ .map((inv) => {
+ const pd = inv.paidDate ? parseMDY(inv.paidDate) : null;
+ return pd && pd.getTime() > cut ? { ...inv, paid: 0, paidDate: '' } : inv;
+ }),
  };
  }
 
@@ -299,7 +315,7 @@ export async function getArProjection(weeks: Week[]): Promise<ArProjectionResult
  }
 
  // 2. Project each open invoice across its channel's curve, distributed weekly.
- const today = new Date();
+ const today = asOf ?? new Date();
  const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
  const stale = staleCutoffDate();
  const placements: ArProjectionRow[] = [];

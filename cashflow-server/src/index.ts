@@ -130,7 +130,7 @@ app.post('/api/disconnect', async (_req, res) => {
 function invalidateExpenseCaches() {
  // Drop the durable caches that depend on QB expense detail / sheet mapping so
  // the next read rebuilds them.
- for (const k of ['expense-detail', 'monthly-opex', 'cashflow-13week:future', 'cashflow-13week:past',
+ for (const k of ['expense-detail', 'monthly-opex', 'cashflow-13week:v2:future', 'cashflow-13week:v2:past',
    'mapped-expenses:PureX:14', 'mapped-expenses:Moysh:14']) dropDurableMem(k);
 }
 
@@ -335,7 +335,10 @@ app.get('/api/expense-detail', async (req, res, next) => {
 // the shared cached expense source, inflows from the live sheet.
 const getCashflow13WeekCached = (direction: 'future' | 'past', force = false) =>
  withDurableCache(
- `cashflow-13week:${direction}`,
+ // v2: bumped after the as-of past forecast + same-week/lagged split. Old
+ // `cashflow-13week:<dir>` rows in qb_cache held a pre-change zero-inflow
+ // result; bumping the key abandons them so cold starts recompute fresh.
+ `cashflow-13week:v2:${direction}`,
  5 * 60 * 1000,
  () => getCashflow13Week(direction === 'past' ? { direction: 'past' } : undefined),
  (d) => Array.isArray((d as { weeks?: unknown[] }).weeks) && (d as { weeks: unknown[] }).weeks.length > 0,
@@ -414,8 +417,8 @@ app.post('/api/cashflow-overrides', async (req, res, next) => {
  };
  await saveCfOverrides(next);
  // invalidate the 13-week durable cache so the next read picks up new overrides
- dropDurableMem('cashflow-13week:future');
- dropDurableMem('cashflow-13week:past');
+ dropDurableMem('cashflow-13week:v2:future');
+ dropDurableMem('cashflow-13week:v2:past');
  res.json(next);
  } catch (err) { next(err); }
 });

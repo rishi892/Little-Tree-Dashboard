@@ -38,13 +38,13 @@ const ROW_INFO: Record<string, { title: string; purpose: string; detail: string;
  'Inventory & Raw Materials': {
  title: 'Inventory & Raw Materials',
  purpose: 'Weekly spend on inventory / raw materials.',
- detail: 'Last-3-month average of the COGS / raw-material expense accounts in QuickBooks ÷ 4.33, spread level across all 13 weeks.',
+ detail: 'Last 3-month average of the QuickBooks COGS / raw-material accounts, weighted toward month-end to match real purchase timing.',
  source: 'QuickBooks expense detail (COGS / raw-material accounts).',
  },
  'Payroll': {
  title: 'Payroll',
  purpose: 'Weekly payroll outflow.',
- detail: 'Last-3-month average of the Payroll expense group in QuickBooks ÷ 4.33, spread level across all 13 weeks.',
+ detail: 'Last 3-month average of the QuickBooks Payroll group, paid bi-weekly (a pay event every other week).',
  source: 'QuickBooks expense detail (Payroll group).',
  },
  'Software & Subscriptions': {
@@ -56,7 +56,7 @@ const ROW_INFO: Record<string, { title: string; purpose: string; detail: string;
  'Other Expenses': {
  title: 'Other Expenses',
  purpose: 'All other weekly operating spend.',
- detail: 'Last-3-month average of every remaining operating-expense category (everything that isn’t payroll, inventory or subscriptions) ÷ 4.33, spread level across the 13 weeks.',
+ detail: 'Last 3-month average of every other operating-expense category (excluding payroll, inventory, subscriptions), spread across the weeks; rent lands on the 1st.',
  source: 'QuickBooks expense detail (all other categories).',
  },
  'Credit Card Payments': {
@@ -483,8 +483,7 @@ export function CashFlow13Week() {
  <div>
  <div className="section-title">Weekly schedule</div>
  <div className="section-sub">
- Rows tagged <span className="pill-tag tag-strong">Live</span> are pulled live from
- Tiller / QB / sheets. Inventory + Payroll + Other = Last 3 months ÷ 4.33.
+ Rows tagged <span className="pill-tag tag-strong">Live</span> pull from Tiller / QB / sheets. Tap the ⓘ on any row to see how it's computed.
  </div>
  </div>
  </div>
@@ -525,6 +524,7 @@ export function CashFlow13Week() {
  </tr>
  {inflows.map((line, idx) => {
  const isProjectedSales = /^projected sales/i.test(line.label);
+ const isDisplayOnly = !!line.displayOnly;
  const sf = data.salesForecast;
  // Scenario swap: if this is the Projected Sales row and a non-base
  // scenario is selected, replace the row's weekly values with the
@@ -535,7 +535,7 @@ export function CashFlow13Week() {
  const rowTotal = rowValues.reduce((s, v) => s + v, 0);
  const scenarioPct = salesScenario === 'best' ? '+18%' : salesScenario === 'worst' ? '-18%' : null;
  return (
- <tr key={`in-${idx}`}>
+ <tr key={`in-${idx}`} style={isDisplayOnly ? { opacity: 0.7, fontStyle: 'italic' } : undefined}>
  <td>
  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
  {line.breakdown && line.breakdown.length > 0 ? (
@@ -549,6 +549,11 @@ export function CashFlow13Week() {
      {...ROW_INFO[line.label]}
      style={{ position: 'static', top: 'auto', right: 'auto', display: 'inline-flex' }}
    />
+ )}
+ {isDisplayOnly && (
+   <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 4, padding: '1px 6px', fontStyle: 'normal', letterSpacing: 0.3 }}>
+     REFERENCE · NOT IN CASH TOTAL
+   </span>
  )}
  {isProjectedSales && sf && (
    <div style={{ display: 'inline-flex', gap: 4, fontSize: 11 }}>
@@ -702,7 +707,7 @@ export function CashFlow13Week() {
  <div className="section-head">
  <div>
  <div className="section-title">Weekly run-rates</div>
- <div className="section-sub">All from QB · L3M average ÷ 4.33.</div>
+ <div className="section-sub">Average weekly spend (from QuickBooks).</div>
  </div>
  </div>
  <div className="table-wrap">
@@ -711,22 +716,18 @@ export function CashFlow13Week() {
  <tr>
  <td>Credit Card payoff (Wk 1)</td>
  <td className="num"><strong>{formatCurrency(assumptions.ccPayoffWk1)}</strong></td>
- <td className="vendor-note">Sum of Tiller Credit Card balances (live).</td>
  </tr>
  <tr>
  <td>Payroll per week</td>
  <td className="num"><strong>{formatCurrency(Math.round(assumptions.payrollPerWeek))}</strong></td>
- <td className="vendor-note">QB Payroll group L3M ÷ 4.33.</td>
  </tr>
  <tr>
  <td>Inventory & Raw Materials per week</td>
  <td className="num"><strong>{formatCurrency(Math.round(assumptions.inventoryPerWeek))}</strong></td>
- <td className="vendor-note">QB COGS Inventory & Raw Materials L3M ÷ 4.33.</td>
  </tr>
  <tr>
  <td>Other operating expenses per week</td>
  <td className="num"><strong>{formatCurrency(Math.round(assumptions.otherPerWeek))}</strong></td>
- <td className="vendor-note">All other Non-Payroll · QB L3M ÷ 4.33.</td>
  </tr>
  </tbody>
  </table>
@@ -1179,8 +1180,12 @@ function PastCashflowTable({
   const a = it.actuals;
   if (!a) return null;
   if (/^gelato/i.test(label))      return a.arActuals?.gelato?.amount ?? 0;
-  if (/^little tree|^non-gelato/i.test(label))  return a.arActuals?.nonGelato?.amount ?? 0;
-  if (/^projected sales/i.test(label)) return (a.salesInvoiced?.gelato?.amount ?? 0) + (a.salesInvoiced?.nonGelato?.amount ?? 0);
+  // Sales (this week) = gross non-Gelato invoiced (reference only).
+  if (isDisplayOnlyInflow(label))  return a.salesInvoiced?.nonGelato?.amount ?? 0;
+  // Past AR Collections (lag-curve) = collections from sales invoiced in EARLIER weeks.
+  if (/^past ar|lag-curve|^little tree|^non-gelato/i.test(label))  return a.arActuals?.nonGelato?.lagged ?? a.arActuals?.nonGelato?.amount ?? 0;
+  // Collected from sales (this week) = same-week cash.
+  if (/collected from sales|^projected/i.test(label)) return a.arActuals?.nonGelato?.sameWeek ?? 0;
   // CC Util etc. have no direct actuals - return null so cell shows just projected.
   return null;
  }
@@ -1341,8 +1346,12 @@ function EmptySection({ title, sub }: { title: string; sub: string }) {
 // ---- actuals + budget line mapping ----------------------------------------
 function actualForInflowLine(label: string, a: WeekActuals): number | null {
  if (/gelato/i.test(label)) return a.arActuals?.gelato?.amount ?? 0;
- if (/little tree|non-gelato/i.test(label)) return a.arActuals?.nonGelato?.amount ?? 0;
- if (/projected|new sales/i.test(label)) return a.salesInvoiced?.total ?? 0;
+ // Sales (this week) = gross non-Gelato invoiced (reference only, not cash).
+ if (isDisplayOnlyInflow(label)) return a.salesInvoiced?.nonGelato?.amount ?? a.salesInvoiced?.total ?? 0;
+ // Past AR Collections = lag collections (invoiced earlier, paid now).
+ if (/past ar|lag-curve|little tree|non-gelato/i.test(label)) return a.arActuals?.nonGelato?.lagged ?? a.arActuals?.nonGelato?.amount ?? 0;
+ // Collected from sales (this week) = same-week cash (invoiced & paid in this week).
+ if (/collected from sales|projected|new sales/i.test(label)) return a.arActuals?.nonGelato?.sameWeek ?? 0;
  return null;
 }
 // Live-expected inflow (by invoice terms) for an inflow line.
@@ -1362,7 +1371,9 @@ function qbActualForOutflowLine(label: string, q: WeekExpenseLines | null): numb
  return null; // Credit Card Payments etc. aren't in the expense P&L
 }
 
-const PW_STD_INFLOW = ['Gelato AR Collections (Net 97)', 'Little Tree AR Collections (lag-curve)', 'Projected AR from new sales (3-bucket)'];
+const PW_STD_INFLOW = ['Gelato AR Collections (Net 97)', 'Past AR Collections (lag-curve)', 'Sales (this week, forecast)', 'Collected from sales (this week)'];
+// Display-only inflow rows: shown for context, NOT summed into the cash total.
+const isDisplayOnlyInflow = (label: string) => /^sales \(this week/i.test(label);
 const PW_TITLES = { budget: 'Past · budgeted (elapsed weeks)', actual: 'Actual · what really happened' };
 
 // ---- Past weeks shared table (Past = budget, Actual = real) ---------------
@@ -1378,6 +1389,19 @@ function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actu
  const TBD = <span style={{ color: 'var(--muted)', fontStyle: 'italic', fontSize: 11 }}>entry yet to be done</span>;
  const wkByMonday = new Map(budgetData.weeks.map((w, i) => [w.start, i]));
  const outflowLabels = budgetData.outflows.map((l) => l.label);
+ // Budget INFLOWS/OUTFLOWS come straight from the budgeted cashflow (direction=past),
+ // aligned to each elapsed week by Monday - so Past = exactly the Budgeted calc.
+ const inflowLabels = budgetData.inflows.map((l) => l.label);
+ const budgetInflow = (it: PastWeeksGridItem, label: string): number | null => {
+  const wi = wkByMonday.get(it.monday);
+  if (wi == null) return null;
+  const line = budgetData.inflows.find((l) => l.label === label);
+  return line ? (line.values[wi] ?? 0) : 0;
+ };
+ const budgetInTotal = (it: PastWeeksGridItem): number | null => {
+  const wi = wkByMonday.get(it.monday);
+  return wi == null ? null : (budgetData.totals.inflows[wi] ?? 0);
+ };
  const budgetOutflow = (it: PastWeeksGridItem, label: string): number | null => {
   const wi = wkByMonday.get(it.monday);
   if (wi == null) return null;
@@ -1388,8 +1412,12 @@ function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actu
   const wi = wkByMonday.get(it.monday);
   return wi == null ? null : (budgetData.totals.outflows[wi] ?? 0);
  };
+ // Total actual inflow = cash actually collected (Gelato + non-Gelato). The
+ // non-Gelato collection already splits into sameWeek (Projected AR) + lagged
+ // (Little Tree AR), so arActuals.total IS the row sum - do NOT add
+ // salesInvoiced (that's gross invoicing, not cash, and would double-count).
  const inflowActualTotal = (it: PastWeeksGridItem): number | null =>
-  it.actuals ? (it.actuals.arActuals?.total ?? 0) + (it.actuals.salesInvoiced?.total ?? 0) : null;
+  it.actuals ? (it.actuals.arActuals?.total ?? 0) : null;
 
  // Each cell shows budget OR actual depending on the mode.
  const oneVal = (budget: number | null, actual: number | null): React.ReactNode => {
@@ -1400,11 +1428,15 @@ function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actu
  };
 
  const sub = mode === 'budget'
-  ? <>The plan for each elapsed week - inflows are the live-expected collection schedule (Gelato Net-97 + AR Net-90), outflows the current run-rate. Newest week on the left.</>
+  ? <>The <strong>budgeted forecast</strong> for each elapsed week - the SAME calculation as the Budgeted tab (Gelato Net-97 + Little Tree AR + run-rate outflows), applied to the weeks that have passed: "what the budget would have been for that week". Newest week on the left.</>
   : <>What really happened - inflows = AR collected + sales invoiced; outflows = actual QB expenses per category (Cash P&L). Un-pulled lines show <em>entry yet to be done</em>.</>;
 
  return (
-  <CollapsibleSection title={`${PW_TITLES[mode]} (${items.length} week${items.length === 1 ? '' : 's'})`} sub={sub}>
+  <div className="section">
+   <div className="section-head"><div>
+    <div className="section-title">{PW_TITLES[mode]} ({items.length} week{items.length === 1 ? '' : 's'})</div>
+    <div className="section-sub">{sub}</div>
+   </div></div>
    <div className="table-wrap">
     <table className="data-table" style={{ fontSize: 12 }}>
      <thead><tr>
@@ -1422,15 +1454,15 @@ function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actu
        {items.map((it) => <td key={it.monday} className="num">{it.snapshot ? fmt(it.snapshot.openingCash) : muted('-')}</td>)}
       </tr>
       <tr><td colSpan={1 + items.length} style={{ background: 'var(--accent-soft)', fontWeight: 700, color: '#059669' }}>CASH INFLOWS</td></tr>
-      {PW_STD_INFLOW.map((label) => (
-       <tr key={`in-${label}`}>
-        <td>{label}</td>
-        {items.map((it) => <td key={it.monday} className="num">{oneVal(expectedForInflowLine(label, it.expectedInflow), it.actuals ? actualForInflowLine(label, it.actuals) : null)}</td>)}
+      {inflowLabels.map((label) => (
+       <tr key={`in-${label}`} style={isDisplayOnlyInflow(label) ? { opacity: 0.7, fontStyle: 'italic' } : undefined}>
+        <td>{label}{isDisplayOnlyInflow(label) && <span style={{ fontStyle: 'normal', fontSize: 9, fontWeight: 700, color: 'var(--muted)', marginLeft: 6, border: '1px solid var(--border)', borderRadius: 3, padding: '0 4px' }}>REF</span>}</td>
+        {items.map((it) => <td key={it.monday} className="num">{oneVal(budgetInflow(it, label), it.actuals ? actualForInflowLine(label, it.actuals) : null)}</td>)}
        </tr>
       ))}
       <tr className="total-row">
        <td>TOTAL INFLOWS</td>
-       {items.map((it) => <td key={it.monday} className="num">{oneVal(it.expectedInflow ? it.expectedInflow.total : null, inflowActualTotal(it))}</td>)}
+       {items.map((it) => <td key={it.monday} className="num">{oneVal(budgetInTotal(it), inflowActualTotal(it))}</td>)}
       </tr>
       <tr><td colSpan={1 + items.length} style={{ background: 'var(--danger-soft)', fontWeight: 700, color: 'var(--danger)' }}>CASH OUTFLOWS</td></tr>
       {outflowLabels.map((label) => (
@@ -1446,8 +1478,8 @@ function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actu
       <tr className="total-row">
        <td><strong>NET CHANGE</strong></td>
        {items.map((it) => {
-        const bo = budgetOutTotal(it);
-        const budNet = (it.expectedInflow && bo != null) ? it.expectedInflow.total - bo : null;
+        const wi = wkByMonday.get(it.monday);
+        const budNet = wi == null ? null : (budgetData.totals.netChange[wi] ?? 0);
         const ai = inflowActualTotal(it);
         const actNet = (ai != null && it.qbExpenses) ? ai - it.qbExpenses.total : null;
         return <td key={it.monday} className="num">{oneVal(budNet, actNet)}</td>;
@@ -1457,7 +1489,7 @@ function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actu
     </table>
    </div>
    {mode === 'actual' && <div className="vendor-note" style={{ marginTop: 8 }}>Outflows = QB Cash-basis P&L per category. Credit-card payments aren't in the expense P&L, so that line stays pending here.</div>}
-  </CollapsibleSection>
+  </div>
  );
 }
 
@@ -1476,24 +1508,40 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
  const bItem = items[Math.min(bIdx, items.length - 1)];
  const wkLabel = (it: PastWeeksGridItem, idx: number) => `Wk -${idx + 1} (${it.monday.slice(5).replace('-', '/')}–${it.weekEnd.slice(5).replace('-', '/')})`;
 
+ // Budget for a past week comes from the SAME past cashflow (`budgetData`,
+ // direction=past) the Past tab uses - looked up by Monday - so inflows AND
+ // outflows share one basis (the as-of forecast). The old code pulled inflows
+ // from `expectedInflow` (a different, lumpy invoice-terms model that had NO
+ // value for "Projected AR"), which is why the budget column came up blank.
+ const budgetInLine = (it: PastWeeksGridItem, label: string): number | null => {
+  const wi = wkByMonday.get(it.monday);
+  if (wi == null) return null;
+  const line = budgetData.inflows.find((l) => l.label === label);
+  return line ? (line.values[wi] ?? 0) : 0;
+ };
  const budgetOutLine = (it: PastWeeksGridItem, label: string): number | null => {
   const wi = wkByMonday.get(it.monday);
   if (wi == null) return null;
   const line = budgetData.outflows.find((l) => l.label === label);
   return line ? (line.values[wi] ?? 0) : 0;
  };
- const aActualInTotal = aItem.actuals ? (aItem.actuals.arActuals?.total ?? 0) + (aItem.actuals.salesInvoiced?.total ?? 0) : null;
- const bOutTotal = (() => { const wi = wkByMonday.get(bItem.monday); return wi == null ? null : (budgetData.totals.outflows[wi] ?? 0); })();
+ const bWi = wkByMonday.get(bItem.monday);
+ const bInTotal = bWi == null ? null : (budgetData.totals.inflows[bWi] ?? 0);
+ const bOutTotal = bWi == null ? null : (budgetData.totals.outflows[bWi] ?? 0);
+ // Actual total inflow = cash collected only (arActuals.total). The row split
+ // (Projected AR = same-week, Little Tree AR = lagged) sums to this; adding
+ // salesInvoiced would double-count gross invoicing that isn't cash.
+ const aActualInTotal = aItem.actuals ? (aItem.actuals.arActuals?.total ?? 0) : null;
 
  type RowDef = { label: string; budget: number | null; actual: number | null; lowerBetter?: boolean; head?: 'in' | 'out'; strong?: boolean };
  const rows: RowDef[] = [];
  rows.push({ label: 'CASH INFLOWS', budget: null, actual: null, head: 'in' });
- for (const lbl of PW_STD_INFLOW) rows.push({ label: lbl, budget: expectedForInflowLine(lbl, bItem.expectedInflow), actual: aItem.actuals ? actualForInflowLine(lbl, aItem.actuals) : null });
- rows.push({ label: 'Total inflows', budget: bItem.expectedInflow ? bItem.expectedInflow.total : null, actual: aActualInTotal, strong: true });
+ for (const lbl of PW_STD_INFLOW) rows.push({ label: lbl, budget: budgetInLine(bItem, lbl), actual: aItem.actuals ? actualForInflowLine(lbl, aItem.actuals) : null });
+ rows.push({ label: 'Total inflows', budget: bInTotal, actual: aActualInTotal, strong: true });
  rows.push({ label: 'CASH OUTFLOWS', budget: null, actual: null, head: 'out' });
  for (const lbl of budgetData.outflows.map((l) => l.label)) rows.push({ label: lbl, budget: budgetOutLine(bItem, lbl), actual: qbActualForOutflowLine(lbl, aItem.qbExpenses), lowerBetter: true });
  rows.push({ label: 'Total outflows', budget: bOutTotal, actual: aItem.qbExpenses ? aItem.qbExpenses.total : null, lowerBetter: true, strong: true });
- const budNet = (bItem.expectedInflow && bOutTotal != null) ? bItem.expectedInflow.total - bOutTotal : null;
+ const budNet = (bInTotal != null && bOutTotal != null) ? bInTotal - bOutTotal : null;
  const actNet = (aActualInTotal != null && aItem.qbExpenses) ? aActualInTotal - aItem.qbExpenses.total : null;
  rows.push({ label: 'NET CHANGE', budget: budNet, actual: actNet, strong: true });
 
@@ -1514,7 +1562,11 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
  };
 
  return (
-  <CollapsibleSection title="Variance · budget vs actual (pick weeks)" sub={<>Choose any <strong>budget</strong> week and any <strong>actual</strong> week and compare them line by line. Green Δ = better than plan (more in, less out, higher net).</>}>
+  <div className="section">
+   <div className="section-head"><div>
+    <div className="section-title">Variance · budget vs actual (pick weeks)</div>
+    <div className="section-sub">Choose any <strong>budget</strong> week and any <strong>actual</strong> week and compare them line by line. Green Δ = better than plan (more in, less out, higher net).</div>
+   </div></div>
    <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginBottom: 14, alignItems: 'center' }}>
     <label style={{ fontSize: 13 }}>Budget week: {dropdown(bIdx, setBIdx)}</label>
     <span style={{ color: 'var(--muted)' }}>vs</span>
@@ -1532,8 +1584,8 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
       {rows.map((r, i) => r.head ? (
        <tr key={i}><td colSpan={4} style={{ background: r.head === 'in' ? 'var(--accent-soft)' : 'var(--danger-soft)', fontWeight: 700, color: r.head === 'in' ? '#059669' : 'var(--danger)' }}>{r.label}</td></tr>
       ) : (
-       <tr key={i} className={r.strong ? 'total-row' : undefined}>
-        <td>{r.strong ? <strong>{r.label}</strong> : r.label}</td>
+       <tr key={i} className={r.strong ? 'total-row' : undefined} style={isDisplayOnlyInflow(r.label) ? { opacity: 0.7, fontStyle: 'italic' } : undefined}>
+        <td>{r.strong ? <strong>{r.label}</strong> : r.label}{isDisplayOnlyInflow(r.label) && <span style={{ fontStyle: 'normal', fontSize: 9, fontWeight: 700, color: 'var(--muted)', marginLeft: 6, border: '1px solid var(--border)', borderRadius: 3, padding: '0 4px' }}>REF</span>}</td>
         <td className="num">{r.budget === null || r.budget === 0 ? muted('-') : fmt(r.budget)}</td>
         <td className="num">{r.actual === null ? <span className="vendor-note" style={{ fontStyle: 'italic' }}>pending</span> : (r.actual === 0 ? muted('-') : fmt(r.actual))}</td>
         <td className="num">{deltaCell(r.budget, r.actual, r.lowerBetter)}</td>
@@ -1542,6 +1594,6 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
      </tbody>
     </table>
    </div>
-  </CollapsibleSection>
+  </div>
  );
 }

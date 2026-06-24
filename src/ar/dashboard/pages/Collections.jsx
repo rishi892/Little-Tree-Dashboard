@@ -973,7 +973,7 @@ function OutstandingByBrand({ invoices }) {
   const brandGroups = useMemo(() => {
     const m = new Map()
     for (const r of invoices) {
-      const b = r.masterBrand || 'No brand'
+      const b = r.masterBrand || r.brand || 'No brand'
       const g = m.get(b) || { brand: b, count: 0, outstanding: 0, vendors: new Set() }
       g.count += 1; g.outstanding += r.outstanding || 0; g.vendors.add(r.vendor)
       m.set(b, g)
@@ -985,7 +985,7 @@ function OutstandingByBrand({ invoices }) {
     if (!brand) return []
     const m = new Map()
     for (const r of invoices) {
-      if ((r.masterBrand || 'No brand') !== brand) continue
+      if ((r.masterBrand || r.brand || 'No brand') !== brand) continue
       const g = m.get(r.vendor) || { vendor: r.vendor, count: 0, outstanding: 0 }
       g.count += 1; g.outstanding += r.outstanding || 0
       m.set(r.vendor, g)
@@ -994,7 +994,7 @@ function OutstandingByBrand({ invoices }) {
   }, [invoices, brand])
 
   const storeInvoices = useMemo(
-    () => invoices.filter((r) => (r.masterBrand || 'No brand') === brand && r.vendor === store),
+    () => invoices.filter((r) => (r.masterBrand || r.brand || 'No brand') === brand && r.vendor === store),
     [invoices, brand, store],
   )
 
@@ -1005,7 +1005,7 @@ function OutstandingByBrand({ invoices }) {
       out.push([bg.brand, '', '', '', bg.outstanding, ''])
       const byStore = new Map()
       for (const r of invoices) {
-        if ((r.masterBrand || 'No brand') !== bg.brand) continue
+        if ((r.masterBrand || r.brand || 'No brand') !== bg.brand) continue
         if (!byStore.has(r.vendor)) byStore.set(r.vendor, [])
         byStore.get(r.vendor).push(r)
       }

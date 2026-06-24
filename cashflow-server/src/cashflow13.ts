@@ -54,6 +54,11 @@ export type CashflowLine = {
  // What makes up this row - the underlying line items (categories, invoices,
  // cards, subscriptions...) so the user can see exactly what's included.
  breakdown?: CashflowBreakdownItem[];
+ // Display-only row: shown for context but NOT summed into total inflows/outflows.
+ // Used for the gross "Sales (this week)" row - the cash from those sales is
+ // already counted via the same-week + lagged AR collection rows, so adding the
+ // gross sales again would double-count. This row is purely informational.
+ displayOnly?: boolean;
 };
 
 export type CashflowResult = {
@@ -239,8 +244,24 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // mode we anchor 13 weeks BEFORE the current Monday so the view covers
  // weeks that have already closed.
  const monday = mondayAnchor();
- const ANCHOR = opts.direction === 'past' ? addDays(monday, -7 * WEEKS) : monday;
+ // Past view anchors at the FIRST MONDAY OF MAY 2026 (matches the past-weeks
+ // grid). The as-of forecast runs from there - "the budget we'd have made at
+ // the start of May", projected forward over the elapsed weeks.
+ const MAY1 = new Date(Date.UTC(2026, 4, 1));
+ const mayDow = MAY1.getUTCDay();
+ const firstMondayMay = addDays(MAY1, mayDow === 1 ? 0 : (8 - mayDow) % 7);
+ const ANCHOR = opts.direction === 'past' ? firstMondayMay : monday;
  const weeks = buildWeeks(ANCHOR, WEEKS);
+ // PAST view: run the sales forecast + AR projection AS-OF the window start, so
+ // each elapsed week is predicted exactly the way we'd have predicted it then
+ // (same trend/seasonality/lag-curve logic, data truncated to that date).
+ // Anchor the as-of at the END of the month before the window start (complete
+ // month) - not the 4th of the month, which would make the forecast extrapolate
+ // a 4-day partial month to a full one (~7x) and wildly over-state the base.
+ const _w0 = new Date(weeks[0].start + 'T00:00:00Z');
+ const asOf = opts.direction === 'past'
+ ? new Date(Date.UTC(_w0.getUTCFullYear(), _w0.getUTCMonth(), 0))
+ : undefined;
  const warnings: string[] = [];
 
  // 1. Opening cash + CC payoff - Tiller live.
@@ -345,12 +366,32 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  const nonGelatoArCollections: number[] = new Array(WEEKS).fill(0);
  let nonGelatoArSource: CashflowSource = 'none';
  try {
- arProjection = await getArProjection(weeks);
+ arProjection = await getArProjection(weeks, asOf);
  for (let i = 0; i < WEEKS; i++) nonGelatoArCollections[i] = arProjection.arByWeek[i];
  for (const w of arProjection.warnings) warnings.push(w);
  if (arProjection.arByWeek.some((v) => v > 0)) nonGelatoArSource = 'live';
  } catch (e) {
  warnings.push(`AR projection failed (${e instanceof Error ? e.message : '?'}) - non-Gelato AR = 0.`);
+ }
+
+ // PAST view: the live AR projection + Gelato-pending placement are forward-
+ // looking and read ~0 on already-collected weeks. Recompute the inflow the
+ // BUDGETED way - "what we'd have forecast for that week": every Gelato batch
+ // (incl. already-collected) placed at issue + Net 97, every AR invoice at
+ // issue + Net 90. So Past = the budgeted calc for the elapsed weeks, not blank.
+ if (opts.direction === 'past') {
+ try {
+ const { getExpectedInflowByWeek } = await import('./weeklyActuals.js');
+ const exp = await getExpectedInflowByWeek(weeks.map((w) => ({ start: w.start, end: w.end })));
+ for (let i = 0; i < WEEKS; i++) {
+ gelatoArCollections[i] = exp[i]?.gelato ?? 0;
+ }
+ if (exp.some((x) => x.gelato > 0)) gelatoArSource = 'computed';
+ // (Little Tree AR is predicted below from the sales run-rate, not the open-
+ // invoice estimate, which reads ~0 for already-collected past weeks.)
+ } catch (e) {
+ warnings.push(`Past expected-inflow failed (${e instanceof Error ? e.message : '?'}).`);
+ }
  }
 
  // 2c. Forward-looking sales forecast (non-Gelato) - covers FUTURE invoices
@@ -361,14 +402,15 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // row in the 13-Week table - it has its own dedicated Sales Forecast tab.
  // We still compute it here so the snapshot capture records what we
  // projected at the same Monday (used by the Past Weeks variance view).
+ // Sales forecast is also computed for the PAST view now - "if we'd budgeted on
+ // that date, how much new-sales AR would we have projected for that week" -
+ // so the "Projected AR from new sales" inflow row fills on the Past tab too.
  let salesForecast: SalesForecastResult | null = null;
- if (opts.direction !== 'past') {
  try {
- salesForecast = await getSalesForecast(weeks);
+ salesForecast = await getSalesForecast(weeks, asOf);
  for (const w of salesForecast.warnings) warnings.push(w);
  } catch (e) {
  warnings.push(`Sales forecast failed (${e instanceof Error ? e.message : '?'}).`);
- }
  }
 
  // Combined AR collections (kept for legacy callers; UI shows the split rows
@@ -474,24 +516,66 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  const invWeekly = invMonthlyAvg / 4.33;
  const otherWeekly = otherMonthlyAvg / 4.33;
 
- // Sales projection row - sums all 3 buckets (wholesale + private label +
- // gelato new-invoice projections). Placed RIGHT BELOW "Non-Gelato AR
- // Collections" so the user can compare: existing open invoices vs new
- // invoices that haven't been booked yet. No double-count with the Gelato
- // AR Collections row above - that row is PENDING invoices (already issued,
- // Net 97 collection), this row is NEW invoices not yet issued.
- const bWholesale    = salesForecast?.buckets.wholesale.weeklyInflow    ?? new Array(WEEKS).fill(0);
- const bPrivateLabel = salesForecast?.buckets.privateLabel.weeklyInflow ?? new Array(WEEKS).fill(0);
- const bGelato       = salesForecast?.buckets.gelato.weeklyInflow       ?? new Array(WEEKS).fill(0);
- const projectedSalesWeekly = new Array(WEEKS).fill(0).map((_, i) =>
-  +((bWholesale[i] ?? 0) + (bPrivateLabel[i] ?? 0) + (bGelato[i] ?? 0)).toFixed(2),
+ // Sales projection row - Little Tree (wholesale) new-invoice projection ONLY.
+ // Private label is excluded per user; Gelato new invoices are NOT added here
+ // because Gelato cash already comes through the "Gelato AR Collections
+ // (Net 97)" row above (adding it here would double-count). Placed RIGHT BELOW
+ // "Non-Gelato AR Collections" so existing open invoices vs new (not-yet-booked)
+ // invoices can be compared.
+ const bWholesale = salesForecast?.buckets.wholesale.weeklyInflow ?? new Array(WEEKS).fill(0);
+ const projectedRaw = new Array(WEEKS).fill(0).map((_, i) =>
+  +(bWholesale[i] ?? 0).toFixed(2),
  );
+ // For the PAST view the forecast above is already anchored AS-OF the window
+ // start (getSalesForecast + getArProjection received asOf), so Projected sales
+ // + Little Tree AR are the proper "budget we'd have made then" - no override.
+ const projectedSalesWeekly = projectedRaw;
  const projectedSalesSource: CashflowSource = projectedSalesWeekly.some((v) => v > 0)
  ? 'computed'
  : 'none';
  const projectedSalesNote = salesForecast
- ? `Combined: Little Tree $${Math.round(salesForecast.buckets.wholesale.scenarioTotals.base.cash).toLocaleString()} + private label $${Math.round(salesForecast.buckets.privateLabel.scenarioTotals.base.cash).toLocaleString()} + gelato $${Math.round(salesForecast.buckets.gelato.scenarioTotals.base.cash).toLocaleString()} = $${Math.round(projectedSalesWeekly.reduce((s,v)=>s+v,0)).toLocaleString()} 13-wk cash`
+ ? `Little Tree (wholesale) new-sales cash only: $${Math.round(projectedSalesWeekly.reduce((s,v)=>s+v,0)).toLocaleString()} over 13 weeks. Private Label & Gelato excluded from this row.`
  : 'Forecast unavailable';
+
+ // --- User's model: split new-sales collections into same-week (immediate) vs
+ // lagged. "Projected AR from new sales" should be only the cash that arrives
+ // the SAME week the sale is invoiced (sale hua aur usi week paisa aaya). The
+ // lagged remainder collects later and belongs with the existing open invoices
+ // in "Little Tree AR Collections (lag-curve)". We split by the historical
+ // same-week collection rate (share of $ collected the same week invoiced, from
+ // LT Financials) - the SAME definition the Actual tab uses - so the combined
+ // total is unchanged; we only move the lagged part of new sales across.
+ let sameWeekRate = 0;
+ try {
+ const { getSameWeekCollectionRate } = await import('./snapshotActuals.js');
+ sameWeekRate = await getSameWeekCollectionRate();
+ } catch (e) {
+ warnings.push(`Same-week rate failed (${e instanceof Error ? e.message : '?'}) - new sales treated as all-lag.`);
+ }
+ for (let i = 0; i < WEEKS; i++) {
+ const newSales = projectedSalesWeekly[i];
+ const immediate = +(newSales * sameWeekRate).toFixed(2);
+ nonGelatoArCollections[i] = +(nonGelatoArCollections[i] + (newSales - immediate)).toFixed(2);
+ projectedSalesWeekly[i] = immediate;
+ }
+ if (nonGelatoArCollections.some((v) => v > 0)) nonGelatoArSource = nonGelatoArSource === 'none' ? 'computed' : nonGelatoArSource;
+ const sameWeekPct = (sameWeekRate * 100).toFixed(0);
+
+ // --- Gross new-sales forecast per week (non-Gelato), for the DISPLAY-ONLY
+ // "Sales (this week)" row. Distribute each bucket's gross MONTHLY forecast
+ // (forecastedSales) across that month's days, then sum the days in each week.
+ // This is the "itna sales hoga" number - NOT added to cash (the cash from it
+ // is already captured by the same-week + lagged AR rows). Context only.
+ const salesGrossWeekly: number[] = new Array(WEEKS).fill(0);
+ if (salesForecast) {
+ // Use the SAME week-of-month gross distribution the Sales Projection page
+ // shows (buckets[].weeklyGross, built from real invoice dates) so this row
+ // matches that tab exactly - instead of an even day-split. Display-only
+ // (not added to cash; the cash is already in the same-week + lagged rows).
+ const wg = salesForecast.buckets.wholesale.weeklyGross ?? [];
+ for (let i = 0; i < WEEKS; i++) salesGrossWeekly[i] = +(wg[i] ?? 0).toFixed(2);
+ }
+ const salesGrossSource: CashflowSource = salesGrossWeekly.some((v) => v > 0) ? 'computed' : 'none';
 
  // --- Breakdowns: the underlying line items behind each row (for the click
  // modal so the user can see exactly what's included). Expense breakdowns use
@@ -521,11 +605,9 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
 
  // (gelatoBreakdown is built above, where the gelato result is in scope.)
 
- // Projected new sales - the 3 forecast buckets.
+ // Projected new sales - Little Tree (wholesale) only.
  const projBreakdown: CashflowBreakdownItem[] = salesForecast ? [
  { label: 'Little Tree (new invoices)', amount: +salesForecast.buckets.wholesale.scenarioTotals.base.cash.toFixed(2), sub: '13-wk cash · base case' },
- { label: 'Private Label (new invoices)', amount: +salesForecast.buckets.privateLabel.scenarioTotals.base.cash.toFixed(2), sub: '13-wk cash · base case' },
- { label: 'Gelato (new invoices)', amount: +salesForecast.buckets.gelato.scenarioTotals.base.cash.toFixed(2), sub: '13-wk cash · base case' },
  ] : [];
 
  // Little Tree AR - top customers by open balance behind the projection.
@@ -550,18 +632,27 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  breakdown: gelatoBreakdown,
  },
  {
- label: 'Little Tree AR Collections (lag-curve)',
+ label: 'Past AR Collections (lag-curve)',
  source: nonGelatoArSource,
- note: arProjection
- ? `Open invoices placed at each customer's typical pay-day (median±σ from paid history) · collectibility haircut applied - ${(arProjection.projectedCollectibilityRate * 100).toFixed(0)}% of open AR booked as cash (older/at-risk invoices discounted)`
- : 'Per-channel collection curve from Invoice Tracker',
+ note: (arProjection
+ ? `Open invoices placed at each customer's typical pay-day (median±σ from paid history) · collectibility haircut applied - ${(arProjection.projectedCollectibilityRate * 100).toFixed(0)}% of open AR booked as cash`
+ : 'Per-channel collection curve from Invoice Tracker')
+ + ` · PLUS the lagged ${100 - +sameWeekPct}% of new sales that don't collect the same week (they age into AR and collect later)`,
  values: nonGelatoArCollections,
  breakdown: ltBreakdown,
  },
  {
- label: 'Projected AR from new sales (3-bucket)',
+ label: 'Sales (this week, forecast)',
+ source: salesGrossSource,
+ note: `Gross Little Tree (wholesale) sales forecast for the week (reference only - NOT added to cash). The cash from these sales shows up as "Collected from sales" (same week) + "Past AR Collections" (the rest, later).`,
+ values: salesGrossWeekly,
+ displayOnly: true,
+ breakdown: projBreakdown,
+ },
+ {
+ label: 'Collected from sales (this week)',
  source: projectedSalesSource,
- note: projectedSalesNote,
+ note: `Same-week cash only: ${sameWeekPct}% of new sales collect the week they're invoiced (from paid history). The other ${100 - +sameWeekPct}% collects later and is shown in Past AR Collections above.`,
  values: projectedSalesWeekly,
  breakdown: projBreakdown,
  },
@@ -621,7 +712,9 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // (Auto CC-utilisation shortfall engine removed - no CC draws/repayments are
  // synthesised; closing cash below reflects the real position.)
 
- const totalInflows = weeks.map((_, i) => sum(inflows.map((l) => l.values), i));
+ // Exclude display-only rows (e.g. gross "Sales (this week)") from the cash
+ // total - their cash is already counted via the collection rows.
+ const totalInflows = weeks.map((_, i) => sum(inflows.filter((l) => !l.displayOnly).map((l) => l.values), i));
  const totalOutflows = weeks.map((_, i) => sum(outflows.map((l) => l.values), i));
  const netChange = weeks.map((_, i) => totalInflows[i] - totalOutflows[i]);
 

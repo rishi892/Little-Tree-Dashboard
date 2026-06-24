@@ -311,6 +311,8 @@ export type SalesForecastResult = {
     privateLabel: BucketForecast;
     gelato: BucketForecast;
   };
+  /** Share of non-Gelato sales $ collected the same week invoiced (2024+ history). */
+  sameWeekRate: number;
   warnings: string[];
 };
 
@@ -333,6 +335,7 @@ export type BucketForecast = {
   weeklyInflow: number[];                    // base scenario per week
   weeklyInflowBest: number[];
   weeklyInflowWorst: number[];
+  weeklyGross: number[];                     // base scenario, GROSS invoiced (before collection lag)
   scenarioTotals: {
     base: { invoiced: number; cash: number };
     best: { invoiced: number; cash: number };
@@ -651,6 +654,7 @@ function emptyBucket(bucket: SalesBucket, label: string, weeks: Week[]): BucketF
     weeklyInflow: new Array(weeks.length).fill(0),
     weeklyInflowBest: new Array(weeks.length).fill(0),
     weeklyInflowWorst: new Array(weeks.length).fill(0),
+    weeklyGross: new Array(weeks.length).fill(0),
     scenarioTotals: {
       base: { invoiced: 0, cash: 0 },
       best: { invoiced: 0, cash: 0 },
@@ -713,6 +717,7 @@ function emptyResult(weeks: Week[], warnings: string[]): SalesForecastResult {
       privateLabel: emptyBucket('privateLabel', 'Private Label / Co-pack', weeks),
       gelato: emptyBucket('gelato', 'Little Tree Gelato', weeks),
     },
+    sameWeekRate: 0,
     warnings,
   };
 }
@@ -751,6 +756,7 @@ type TotalForecastResult = {
   weeklyInflow: number[];
   weeklyInflowBest: number[];
   weeklyInflowWorst: number[];
+  weeklyGross: number[];
   totalForecastedInvoice: number;
   totalProjectedCash: number;
   totalForecastedInvoiceBest: number;
@@ -1087,32 +1093,42 @@ function computeTotalLevelForecast(
     .map(([ym, m]) => ({ ym, total: +m.total.toFixed(2), invoiceCount: m.invoiceCount }))
     .sort((a, b) => a.ym.localeCompare(b.ym));
 
-  // --- 3. Seasonality (average across ALL complete years, not just the most recent) ---
-  // More years = smoother, more robust seasonality signal. With 2024+2025
-  // both available, we average each month's value across both years and
-  // normalise to the 2-year per-month mean. Falls back to single-year if
-  // only one complete year exists.
-  const completeYears = yearly.filter((y) => !y.isPartial && y.monthsObserved >= 10);
+  // --- 3. Seasonality (calendar-month index) ---
+  // Average each calendar month across EVERY completed month we have - 2024,
+  // 2025, and 2026's already-closed months - EXCLUDING the running month
+  // (still filling in). Including the recent year keeps the shape current
+  // (2026 is softer than 2025, so it should count). A light shrink-toward-1.0
+  // plus a clamp stops a single anomalous month (one unusually low May, a
+  // year-end-catch-up December) from swinging an index to an implausible
+  // extreme - that distortion used to double-hit accuracy because the base
+  // calibration also divides by these indices.
+  const runningYm = ymKey(todayUtc);
+  const seasSum = new Array(12).fill(0);
+  const seasCnt = new Array(12).fill(0);
+  const seasYears = new Set<string>();
+  for (const m of monthly) {
+    if (m.ym >= runningYm) continue;                 // drop running + future months
+    const [yStr, mStr] = m.ym.split('-');
+    if (Number(yStr) < FORECAST_YEAR_FLOOR) continue;
+    seasSum[Number(mStr) - 1] += m.total;
+    seasCnt[Number(mStr) - 1] += 1;
+    seasYears.add(yStr);
+  }
+  const seasAvg = seasSum.map((s, i) => (seasCnt[i] > 0 ? s / seasCnt[i] : 0));
+  const seasObserved = seasAvg.filter((v) => v > 0);
+  const seasGrandMean = seasObserved.length > 0
+    ? seasObserved.reduce((s, v) => s + v, 0) / seasObserved.length
+    : 0;
+  const SEAS_SHRINK = 0.85;            // 85% measured, 15% pulled toward 1.0
+  const SEAS_MIN = 0.55, SEAS_MAX = 1.55;
   const seasonality: SeasonalityPoint[] = [];
-  if (completeYears.length > 0) {
-    const sumByMonth = new Array(12).fill(0);
-    const cntByMonth = new Array(12).fill(0);
-    for (const cy of completeYears) {
-      for (const m of monthly) {
-        if (m.ym.startsWith(cy.year + '-')) {
-          const mi = Number(m.ym.split('-')[1]) - 1;
-          sumByMonth[mi] += m.total;
-          cntByMonth[mi] += 1;
-        }
-      }
-    }
-    const avgByMonth = sumByMonth.map((s, i) => (cntByMonth[i] > 0 ? s / cntByMonth[i] : 0));
-    const grandMean = avgByMonth.reduce((s, v) => s + v, 0) / 12 || 1;
-    const basisLabel = completeYears.length === 1
-      ? completeYears[0].year
-      : `${completeYears[0].year}-${completeYears[completeYears.length - 1].year} avg`;
+  if (seasGrandMean > 0) {
+    const yrs = [...seasYears].sort();
+    const basisLabel = yrs.length <= 1 ? (yrs[0] ?? '') : `${yrs[0]}-${yrs[yrs.length - 1]}`;
     for (let i = 0; i < 12; i++) {
-      const idx = grandMean > 0 ? avgByMonth[i] / grandMean : 1;
+      const raw = seasAvg[i] > 0 ? seasAvg[i] / seasGrandMean : 1;
+      const shrunk = SEAS_SHRINK * raw + (1 - SEAS_SHRINK);
+      const idx = Math.max(SEAS_MIN, Math.min(SEAS_MAX, shrunk));
       seasonality.push({ monthOfYear: i + 1, index: +idx.toFixed(3), basisYear: basisLabel });
     }
   } else {
@@ -1305,13 +1321,14 @@ function computeTotalLevelForecast(
     let methodLabel: ForecastMonthRow['method'];
 
     if (h.ym === currentYm && currentMtd > 0) {
-      // Current month override: pace-based extrapolation from MTD actuals.
-      // For May 16 with $132k invoiced this gives ~$256k full-month, which
-      // is what the user asked us to honour (pace over biased seasonality).
-      const paceFullMonth = pctCompletedExpected > 0.02
-        ? currentMtd / pctCompletedExpected
-        : currentMtd * (daysInCurrMonth / Math.max(1, todayDay));
-      baseValue = Math.max(currentMtd, paceFullMonth);
+      // Current month: pace-based extrapolation from MTD actuals, but the
+      // divisor is floored (so an early-month tiny-% can't blow the estimate
+      // up) and the result is capped at 1.8x the seasonal anchor so a single
+      // fast week can't print an implausible full-month number.
+      const safePct = Math.max(0.10, pctCompletedExpected);
+      const paceFullMonth = currentMtd / safePct;
+      const seasonalAnchor = APPROVED_DESEASON_BASE * seasonalIdx;
+      baseValue = Math.min(Math.max(currentMtd, paceFullMonth), seasonalAnchor * 1.8);
       methodLabel = 'baseline-x-seasonal';   // pace-based; label kept for type compat
     } else {
       // Approved methodology: deseasonalized base × seasonality index.
@@ -1382,6 +1399,24 @@ function computeTotalLevelForecast(
   const weeklyInflowBest = distributeMonthlyToWeeks(monthlyForecastBest);
   const weeklyInflowWorst = distributeMonthlyToWeeks(monthlyForecastWorst);
 
+  // Weekly GROSS sales (invoiced, BEFORE collection lag): each forecast
+  // month's gross assigned to its own weeks by the real week-of-month share
+  // (measured from actual invoice dates). "How much we expect to sell each
+  // week"; the lagged weeklyInflow above is when that cash lands.
+  const weeklyGross = new Array(weeks.length).fill(0);
+  for (const mf of monthlyForecast) {
+    const [yr, mo] = mf.ym.split('-').map(Number);
+    for (let wIdx = 0; wIdx < weeks.length; wIdx++) {
+      const ws = new Date(weeks[wIdx].start + 'T00:00:00Z');
+      const mid = new Date(ws);
+      mid.setUTCDate(mid.getUTCDate() + 3);                 // week midpoint = its month
+      if (mid.getUTCFullYear() !== yr || mid.getUTCMonth() !== mo - 1) continue;
+      const wom = weekOfMonthIndex(ws);
+      weeklyGross[wIdx] += mf.forecastedSales * (womWeights[wom] ?? 0);
+    }
+  }
+  for (let i = 0; i < weeklyGross.length; i++) weeklyGross[i] = +weeklyGross[i].toFixed(2);
+
   return {
     yearly,
     monthly,
@@ -1403,6 +1438,7 @@ function computeTotalLevelForecast(
     weeklyInflow,
     weeklyInflowBest,
     weeklyInflowWorst,
+    weeklyGross,
     totalForecastedInvoice: +monthlyForecast.reduce((s, m) => s + m.forecastedSales, 0).toFixed(2),
     totalProjectedCash: +weeklyInflow.reduce((s, v) => s + v, 0).toFixed(2),
     totalForecastedInvoiceBest: +monthlyForecastBest.reduce((s, m) => s + m.forecastedSales, 0).toFixed(2),
@@ -1414,11 +1450,14 @@ function computeTotalLevelForecast(
   };
 }
 
-export async function getSalesForecast(weeks: Week[]): Promise<SalesForecastResult> {
+export async function getSalesForecast(weeks: Week[], asOf?: Date): Promise<SalesForecastResult> {
   const warnings: string[] = [];
   if (weeks.length === 0) return emptyResult(weeks, warnings);
 
-  const today = new Date();
+  // asOf re-runs the forecast "as it would have looked on a past date" - the
+  // anchor and the history are truncated to that date. Used to predict past
+  // weeks the same way we predict the future. Defaults to now (live budget).
+  const today = asOf ?? new Date();
   const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
 
   let tracker;
@@ -1427,6 +1466,21 @@ export async function getSalesForecast(weeks: Week[]): Promise<SalesForecastResu
   } catch (e) {
     warnings.push(`Invoice Tracker fetch failed (${e instanceof Error ? e.message : '?'}) - sales forecast = 0.`);
     return emptyResult(weeks, warnings);
+  }
+  if (asOf) {
+    // Only invoices issued on/before the anchor; a payment dated after the
+    // anchor is treated as "still open" as of that date (so the lag curve and
+    // history reflect only what was known then).
+    const cut = todayUtc.getTime();
+    tracker = {
+      ...tracker,
+      invoices: tracker.invoices
+        .filter((inv) => inv.invoiceDate.getTime() <= cut)
+        .map((inv) => {
+          const pd = inv.paidDate ? parseMDYToDate(inv.paidDate) : null;
+          return pd && pd.getTime() > cut ? { ...inv, paidDate: '' } : inv;
+        }),
+    };
   }
 
   // Build the lookback window of months we'll fit the trend on.
@@ -1697,6 +1751,7 @@ export async function getSalesForecast(weeks: Week[]): Promise<SalesForecastResu
       weeklyInflow: r.weeklyInflow,
       weeklyInflowBest: r.weeklyInflowBest,
       weeklyInflowWorst: r.weeklyInflowWorst,
+      weeklyGross: r.weeklyGross,
       scenarioTotals: {
         base: { invoiced: r.totalForecastedInvoice, cash: r.totalProjectedCash },
         best: { invoiced: r.totalForecastedInvoiceBest, cash: r.totalProjectedCashBest },
@@ -1713,6 +1768,14 @@ export async function getSalesForecast(weeks: Week[]): Promise<SalesForecastResu
     privateLabel: makeBucket('privateLabel', 'Private Label / Co-pack', totalLevelSource, privateLabelLevel),
     gelato: makeBucket('gelato', 'Little Tree Gelato', totalLevelSource, gelatoLevel),
   };
+
+  // Same-week collection rate: share of non-Gelato sales $ that gets paid the
+  // SAME calendar week it's invoiced (from 2024+ LT Financials paid history).
+  let sameWeekRate = 0;
+  try {
+    const { getSameWeekCollectionRate } = await import('./snapshotActuals.js');
+    sameWeekRate = await getSameWeekCollectionRate();
+  } catch { /* leave 0 if unavailable */ }
 
   // Customer-cohort projection (LT Financials, per-customer reorder cycle).
   // Runs in parallel to the statistical anchor above; the UI shows both so
@@ -1776,6 +1839,7 @@ export async function getSalesForecast(weeks: Week[]): Promise<SalesForecastResu
     totalProjectedCash: +weeklyInflow.reduce((s, v) => s + v, 0).toFixed(2),
     cohortForecast,
     buckets,
+    sameWeekRate: +sameWeekRate.toFixed(4),
     warnings,
   };
 }
