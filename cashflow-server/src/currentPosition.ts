@@ -110,7 +110,7 @@ async function qboGet<T>(pathAndQuery: string): Promise<T> {
  return (await res.json()) as T;
 }
 
-type QbAccount = {
+export type QbAccount = {
  Id: string;
  Name: string;
  AccountType: string;
@@ -139,7 +139,7 @@ async function queryAccounts(type: string): Promise<QbAccount[]> {
  return (data.QueryResponse.Account ?? []).filter((a) => a.Active !== false);
 }
 
-async function queryAllAccounts(): Promise<QbAccount[]> {
+export async function queryAllAccounts(): Promise<QbAccount[]> {
  const q = encodeURIComponent(`select * from Account maxresults 1000`);
  const data = await qboGet<AccountQueryResponse>(`query?query=${q}&minorversion=70`);
  return (data.QueryResponse.Account ?? []).filter((a) => a.Active !== false);

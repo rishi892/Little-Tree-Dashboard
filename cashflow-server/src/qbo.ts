@@ -180,7 +180,16 @@ export async function getDashboardData(monthsBack = 12): Promise<DashboardData> 
  })(),
  getMonthlyProfitAndLoss(ymd(start), ymd(end)),
  ]);
- const currentCash = tillerBalances ?? await getCashAccountsBalance();
+ // Cash on Hand = the SAME 4 accounts as Current Position & the 13-week opening
+ // (sab jagah ek): Tiller business banks (Checking + BMM) + PureX QB bank +
+ // Due From PureX (Gelato). The QB part is fetched SEQUENTIALLY here (after the
+ // Promise.all) to avoid a concurrent QB token refresh.
+ let currentCash = tillerBalances ?? await getCashAccountsBalance();
+ try {
+ const { getQbIntercompanyCash } = await import('./cashOnHand.js');
+ const ic = await getQbIntercompanyCash();
+ currentCash = +(currentCash + ic.pureXBank + ic.dueFromPurex).toFixed(2);
+ } catch { /* QB unavailable - keep bank-only cash */ }
 
  // Overlay Combined-view per-month expenses onto the chart so the chart's
  // expense bars tie to the burn KPI.

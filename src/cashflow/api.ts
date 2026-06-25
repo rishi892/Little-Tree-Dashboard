@@ -1999,6 +1999,31 @@ export async function fetchCollectedDetail(start: string, end: string): Promise<
  return res.json();
 }
 
+// Outflow drill-down: PureX-paid expense entries (live sheet) grouped by budget line.
+export type ExpenseEntry = { date: string; description: string; amount: number; category: string; line: string };
+export type ExpenseEntriesRange = {
+ start: string; end: string;
+ byLine: Record<string, { total: number; entries: ExpenseEntry[] }>;
+ total: number;
+};
+export async function fetchExpenseEntries(start: string, end: string): Promise<ExpenseEntriesRange> {
+ const res = await fetch(`/api/expense-entries?start=${start}&end=${end}`);
+ if (!res.ok) throw new Error(`Failed to load expense entries: ${res.status}`);
+ return res.json();
+}
+
+// Combined (PureX + Moysh) actual expense for a calendar month — budget basis.
+export type CombinedActual = {
+ month: string; isCurrentMonth: boolean; source: string;
+ byLine: Record<string, number>;
+ entries: ExpenseEntry[];
+};
+export async function fetchCombinedActual(month: string): Promise<CombinedActual> {
+ const res = await fetch(`/api/combined-actual?month=${month}`);
+ if (!res.ok) throw new Error(`Failed to load combined actual: ${res.status}`);
+ return res.json();
+}
+
 // AR projection methodology (Projections → AR tab). Per-customer collection lag,
 // collectibility haircut, lag curve, weekly placements.
 export type ArLagCurvePoint = { lag: number; pctOfInvoiced: number };

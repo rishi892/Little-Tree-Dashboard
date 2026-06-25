@@ -3,12 +3,12 @@ import { createPortal } from 'react-dom';
 import {
  fetchCashflow13, fetchCashflowOverrides, saveCashflowOverrides,
  fetchCurrentMonthOverview, fetchPastWeeksGrid,
- fetchCashflowEdits, saveCashflowEdits, currentUserName, fetchCollectedDetail,
+ fetchCashflowEdits, saveCashflowEdits, currentUserName, fetchCollectedDetail, fetchExpenseEntries, fetchCombinedActual,
  type Cashflow13, type CashflowSource, type CashflowStatus, type CashflowOverrides,
  type CashflowLine, type CurrentMonthOverview, type PastWeeksGridResponse,
  type PastWeeksGridItem, type WeekActuals,
  type WeekExpenseLines, type ExpectedInflowWeek, type CashflowEdits,
- type CollectedDetail, type CollectedInvoice,
+ type CollectedDetail, type CollectedInvoice, type ExpenseEntriesRange, type ExpenseEntry, type CombinedActual,
 } from '../api';
 import { CollapsibleSection } from './CollapsibleSection';
 import InfoTip from '../../ar/dashboard/components/InfoTip.jsx';
@@ -1548,8 +1548,10 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
  const [mode, setMode] = useState<'week' | 'month'>('week');
  const [idx, setIdx] = useState(0);
  const [detail, setDetail] = useState<CollectedDetail | null>(null);
+ const [expenses, setExpenses] = useState<ExpenseEntriesRange | null>(null);
+ const [combined, setCombined] = useState<CombinedActual | null>(null);
  const [loadingDetail, setLoadingDetail] = useState(false);
- const [modal, setModal] = useState<{ title: string; invoices: CollectedInvoice[] } | null>(null);
+ const [modal, setModal] = useState<{ title: string; invoices?: CollectedInvoice[]; expenses?: ExpenseEntry[] } | null>(null);
 
  const items = pastGrid?.items ?? [];
  const monthLabel = (ym: string) => { const [y, m] = ym.split('-'); return `${VAR_MN[Number(m) - 1] ?? m} ${y}`; };
@@ -1578,14 +1580,20 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
   }
  }
 
+ // Month-mode outflow uses the deduped Combined (PureX+Moysh) actual = budget basis.
+ const selMonth = sel && mode === 'month' ? sel.items[0].monday.slice(0, 7) : '';
  useEffect(() => {
-  if (!periodStart || !periodEnd) { setDetail(null); return; }
+  if (!periodStart || !periodEnd) { setDetail(null); setExpenses(null); setCombined(null); return; }
   let alive = true; setLoadingDetail(true);
-  fetchCollectedDetail(periodStart, periodEnd)
-   .then((d) => { if (alive) { setDetail(d); setLoadingDetail(false); } })
-   .catch(() => { if (alive) { setDetail(null); setLoadingDetail(false); } });
+  Promise.all([
+   fetchCollectedDetail(periodStart, periodEnd),
+   fetchExpenseEntries(periodStart, periodEnd),
+   selMonth ? fetchCombinedActual(selMonth) : Promise.resolve(null),
+  ])
+   .then(([d, e, c]) => { if (alive) { setDetail(d); setExpenses(e); setCombined(c); setLoadingDetail(false); } })
+   .catch(() => { if (alive) { setDetail(null); setExpenses(null); setCombined(null); setLoadingDetail(false); } });
   return () => { alive = false; };
- }, [periodStart, periodEnd]);
+ }, [periodStart, periodEnd, selMonth]);
 
  if (!pastGrid) return <LoadingSection title="Variance" />;
  if (items.length === 0 || !sel) return <EmptySection title="Variance" sub="No past weeks data yet." />;
@@ -1614,15 +1622,36 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
   return null;
  };
  const aInTotal = detail ? +(detail.nonGelato.total + detail.gelato.total).toFixed(2) : null;
- const actualOut = (lbl: string): number | null => { let any = false, t = 0; for (const it of gridItems) if (it.qbExpenses) { any = true; t += qbActualForOutflowLine(lbl, it.qbExpenses) ?? 0; } return any ? t : null; };
- const aOutTotal = (() => { let any = false, t = 0; for (const it of gridItems) if (it.qbExpenses) { any = true; t += it.qbExpenses.total; } return any ? t : null; })();
+ // ACTUAL outflow. MONTH mode → deduped Combined (PureX + Moysh) = the budget's
+ // exact basis (settled months) / live PureX (current month). WEEK mode → live
+ // PureX sheet by week (Combined isn't available below month granularity).
+ const actualOut = (lbl: string): number | null => {
+  if (lbl === 'Credit Card Payments') return null;   // not in these sources
+  if (mode === 'month') return combined ? (combined.byLine[lbl] ?? 0) : null;
+  return expenses ? (expenses.byLine[lbl]?.total ?? 0) : null;
+ };
+ const aOutTotal = mode === 'month'
+  ? (combined ? +Object.values(combined.byLine).reduce((s, v) => s + v, 0).toFixed(2) : null)
+  : (expenses ? expenses.total : null);
 
- // Drill-down: which line opens which invoice list.
- const drillFor = (lbl: string): CollectedInvoice[] | null => {
+ // Drill-down: inflow lines → collected invoices; outflow lines → expense entries.
+ const drillInflow = (lbl: string): CollectedInvoice[] | null => {
   if (!detail) return null;
   if (/gelato/i.test(lbl)) return detail.gelato.invoices;
-  if (/past ar|little tree account|lag-curve|non-gelato/i.test(lbl) || /total inflows/i.test(lbl)) return /total inflows/i.test(lbl) ? [...detail.nonGelato.invoices, ...detail.gelato.invoices] : detail.nonGelato.invoices;
+  if (/total inflows/i.test(lbl)) return [...detail.nonGelato.invoices, ...detail.gelato.invoices];
+  if (/past ar|little tree account|lag-curve|non-gelato/i.test(lbl)) return detail.nonGelato.invoices;
   return null;
+ };
+ const drillOutflow = (lbl: string): ExpenseEntry[] | null => {
+  if (mode === 'month') {
+   // Settled-month Combined has no transaction list; current-month sheet entries do.
+   if (!combined || combined.entries.length === 0) return null;
+   if (/total outflows/i.test(lbl)) return combined.entries;
+   return combined.entries.filter((e) => e.line === lbl);
+  }
+  if (!expenses) return null;
+  if (/total outflows/i.test(lbl)) return Object.values(expenses.byLine).flatMap((v) => v.entries);
+  return expenses.byLine[lbl]?.entries ?? null;
  };
 
  type RowDef = { label: string; budget: number | null; actual: number | null; lowerBetter?: boolean; head?: 'in' | 'out'; strong?: boolean };
@@ -1643,8 +1672,9 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
   const d = actual - b;
   const good = lowerBetter ? d <= 0 : d >= 0;
   const tone = good ? '#059669' : 'var(--danger)';
-  const pct = b !== 0 ? Math.round((actual / b) * 100) : null;
-  return <span style={{ color: tone, fontWeight: 600 }}>{d >= 0 ? '+' : ''}{fmt(d)}{pct !== null ? ` · ${pct}%` : ''}</span>;
+  // % of the DIFFERENCE vs budget (how far actual is from budget), not actual/budget.
+  const pct = b !== 0 ? Math.round((d / b) * 100) : null;
+  return <span style={{ color: tone, fontWeight: 600 }}>{d >= 0 ? '+' : ''}{fmt(d)}{pct !== null ? ` · ${pct >= 0 ? '+' : ''}${pct}%` : ''}</span>;
  };
  const toggleBtn = (m: 'week' | 'month', txt: string) => (
   <button onClick={() => { setMode(m); setIdx(0); }} style={{ padding: '6px 16px', borderRadius: 8, border: 'none', cursor: 'pointer', fontWeight: mode === m ? 700 : 500, background: mode === m ? 'var(--accent, #047857)' : 'transparent', color: mode === m ? '#fff' : 'var(--muted)' }}>{txt}</button>
@@ -1669,6 +1699,12 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
     </label>
     {loadingDetail && <span style={{ fontSize: 12, color: 'var(--muted)' }}>loading actuals…</span>}
    </div>
+   {mode === 'month' && combined && (
+    <div className="vendor-note" style={{ marginBottom: 8 }}>
+     Outflow actual = <strong>{combined.isCurrentMonth ? 'PureX (live sheet)' : 'Combined (PureX + Moysh)'}</strong> · {combined.source}
+     {combined.isCurrentMonth && <span style={{ color: 'var(--danger)' }}> — Moysh for this month settles in QuickBooks after month-end (cash-basis lag).</span>}
+    </div>
+   )}
    <div className="table-wrap">
     <table className="data-table" style={{ fontSize: 12 }}>
      <thead><tr>
@@ -1680,15 +1716,22 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
      <tbody>
       {rows.map((r, i) => {
        if (r.head) return <tr key={i}><td colSpan={4} style={{ background: r.head === 'in' ? 'var(--accent-soft)' : 'var(--danger-soft)', fontWeight: 700, color: r.head === 'in' ? '#059669' : 'var(--danger)' }}>{r.label}</td></tr>;
-       const inv = drillFor(r.label);
-       const canDrill = !!inv && inv.length > 0;
+       const inv = drillInflow(r.label);
+       const exp = drillOutflow(r.label);
+       const n = (inv && inv.length) || (exp && exp.length) || 0;
+       const canDrill = n > 0;
+       const open = () => {
+        const title = `${DISPLAY_LABELS[r.label] || r.label} · ${sel.label}`;
+        if (inv && inv.length) setModal({ title: `${title} (collected)`, invoices: inv });
+        else if (exp && exp.length) setModal({ title: `${title} (paid)`, expenses: exp });
+       };
        return (
         <tr key={i} className={r.strong ? 'total-row' : undefined} style={{ ...(isDisplayOnlyInflow(r.label) ? { opacity: 0.7, fontStyle: 'italic' } : {}), ...(canDrill ? { cursor: 'pointer' } : {}) }}
-         onClick={canDrill ? () => setModal({ title: `${DISPLAY_LABELS[r.label] || r.label} collected · ${sel.label}`, invoices: inv! }) : undefined}>
+         onClick={canDrill ? open : undefined}>
          <td>
           {r.strong ? <strong>{DISPLAY_LABELS[r.label] || r.label}</strong> : (DISPLAY_LABELS[r.label] || r.label)}
           {isDisplayOnlyInflow(r.label) && <span style={{ fontStyle: 'normal', fontSize: 9, fontWeight: 700, color: 'var(--muted)', marginLeft: 6, border: '1px solid var(--border)', borderRadius: 3, padding: '0 4px' }}>REF</span>}
-          {canDrill && <span style={{ marginLeft: 8, fontSize: 10, color: 'var(--accent-hover, #047857)', borderBottom: '1px solid currentColor' }}>{inv!.length} invoices →</span>}
+          {canDrill && <span style={{ marginLeft: 8, fontSize: 10, color: 'var(--accent-hover, #047857)', borderBottom: '1px solid currentColor' }}>{n} {inv && inv.length ? 'invoices' : 'entries'} →</span>}
          </td>
          <td className="num">{r.budget === null || r.budget === 0 ? muted('-') : fmt(r.budget)}</td>
          <td className="num">{r.actual === null ? (loadingDetail ? muted('…') : <span className="vendor-note" style={{ fontStyle: 'italic' }}>pending</span>) : (r.actual === 0 ? muted('-') : fmt(r.actual))}</td>
@@ -1699,7 +1742,11 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
      </tbody>
     </table>
    </div>
-   {modal && createPortal(<CollectedModal title={modal.title} invoices={modal.invoices} onClose={() => setModal(null)} />, document.body)}
+   {modal && createPortal(
+    modal.expenses
+     ? <ExpenseModal title={modal.title} entries={modal.expenses} onClose={() => setModal(null)} />
+     : <CollectedModal title={modal.title} invoices={modal.invoices ?? []} onClose={() => setModal(null)} />,
+    document.body)}
   </div>
  );
 }
@@ -1726,6 +1773,38 @@ function CollectedModal({ title, invoices, onClose }: { title: string; invoices:
          <td style={{ whiteSpace: 'nowrap', color: 'var(--muted)' }}>{inv.invoiceDate}</td>
          <td style={{ whiteSpace: 'nowrap' }}>{inv.paidDate}</td>
          <td className="num"><strong>{fmt0(inv.paid)}</strong></td>
+        </tr>
+       ))}
+      </tbody>
+     </table>
+    </div>
+   </div>
+  </div>
+ );
+}
+
+// Drill-down modal: the actual PureX-paid expense entries in the period (sheet).
+function ExpenseModal({ title, entries, onClose }: { title: string; entries: ExpenseEntry[]; onClose: () => void }) {
+ const fmt0 = (n: number) => formatCurrency(Math.round(n));
+ const total = entries.reduce((s, e) => s + e.amount, 0);
+ const sorted = [...entries].sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999') || b.amount - a.amount);
+ return (
+  <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+   <div onClick={(e) => e.stopPropagation()} style={{ background: 'var(--bg, #fff)', borderRadius: 12, maxWidth: 900, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: '1px solid var(--border)' }}>
+     <div><strong style={{ fontSize: 16 }}>{title}</strong> <span style={{ color: 'var(--muted)' }}>· {entries.length} entries · {fmt0(total)}</span></div>
+     <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: 'var(--muted)' }}>×</button>
+    </div>
+    <div style={{ overflow: 'auto', padding: '0 4px' }}>
+     <table className="data-table">
+      <thead><tr><th>Paid on</th><th style={{ minWidth: 260 }}>Description</th><th>Category</th><th className="num">Amount</th></tr></thead>
+      <tbody>
+       {sorted.slice(0, 500).map((e, i) => (
+        <tr key={`${e.description}-${i}`}>
+         <td style={{ whiteSpace: 'nowrap', color: e.date ? undefined : 'var(--muted)' }}>{e.date || '—'}</td>
+         <td>{e.description}</td>
+         <td style={{ color: 'var(--muted)', fontSize: 11 }}>{e.category}</td>
+         <td className="num"><strong>{fmt0(e.amount)}</strong></td>
         </tr>
        ))}
       </tbody>

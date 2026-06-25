@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
-import { disconnect, fetchDashboard, fetchStatus, type DashboardData, type Status } from './api';
+import { disconnect, fetchDashboard, fetchStatus, fetchCashflow13, type DashboardData, type Cashflow13, type Status } from './api';
 import { formatCurrency, formatMonths, formatSigned } from './format';
 import { KpiCard } from './components/KpiCard';
-import { CashflowChart } from './components/CashflowChart';
-import { CollapsibleSection } from './components/CollapsibleSection';
+import { Projection13WeekChart } from './components/Projection13WeekChart';
 import { Sidebar } from './components/Sidebar';
 import { ExpensesHub } from './components/ExpensesHub';
 import { CashflowHub } from './components/CashflowHub';
@@ -86,6 +85,7 @@ export default function App() {
 function Dashboard({ onSignOut }: { onSignOut: () => void }) {
  const [status, setStatus] = useState<Status | null>(null);
  const [data, setData] = useState<DashboardData | null>(null);
+ const [cf13, setCf13] = useState<Cashflow13 | null>(null);
  const [error, setError] = useState<string | null>(null);
  const [loading, setLoading] = useState(false);
  const [view, setView] = useState<ViewKey>('cashflow');
@@ -109,6 +109,9 @@ function Dashboard({ onSignOut }: { onSignOut: () => void }) {
  if (s?.connected) {
  const d = await fetchDashboard();
  setData(d);
+ // 13-week projection for the chart (cached - fetched sequentially after
+ // the dashboard so we never fire two QB recomputes at once).
+ try { setCf13(await fetchCashflow13()); } catch { /* chart optional */ }
  } else {
  setData(null);
  }
@@ -188,6 +191,7 @@ function Dashboard({ onSignOut }: { onSignOut: () => void }) {
  <DashboardView
  status={status}
  data={data}
+ cf13={cf13}
  loading={loading}
  error={error}
  onRefresh={refreshDashboard}
@@ -209,12 +213,14 @@ function Dashboard({ onSignOut }: { onSignOut: () => void }) {
 function DashboardView({
  status,
  data,
+ cf13,
  loading,
  error,
  onRefresh,
 }: {
  status: Status | null;
  data: DashboardData | null;
+ cf13: Cashflow13 | null;
  loading: boolean;
  error: string | null;
  onRefresh: () => void;
@@ -271,9 +277,9 @@ function DashboardView({
  <div className="kpis">
  <KpiCard
  label="Cash on hand"
- period="Business accounts (live)"
+ period="Live · same as Current Position"
  value={formatCurrency(data.currentCash)}
- sub="CRB Indirect 7561 + Business MM 0910 (Tiller)"
+ sub="Checking + BMM + PureX bank + Due From PureX"
  highlight
  />
  <KpiCard
@@ -303,12 +309,19 @@ function DashboardView({
  />
  </div>
 
- <CollapsibleSection
- title="Monthly cash flow"
- sub={`Income, expenses, and net by month (${data.monthly.length} months). Source: QBO Profit & Loss.`}
- >
- <CashflowChart data={data.monthly} />
- </CollapsibleSection>
+ {cf13 && cf13.weeks.length > 0 && (
+ <div className="section">
+ <div className="section-head">
+ <div>
+ <div className="section-title">13-Week Cash Projection</div>
+ <div className="section-sub">
+ Weekly inflow vs outflow + closing-cash runway · Wk1 = this week ({cf13.weeks[0]?.label}) · from your 13-week projection
+ </div>
+ </div>
+ </div>
+ <Projection13WeekChart data={cf13} />
+ </div>
+ )}
  </>
  )}
  </>

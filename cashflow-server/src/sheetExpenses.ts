@@ -333,18 +333,23 @@ export async function getSheetExpenses(): Promise<SheetExpensesResult> {
  if (!date) continue;
  if (amt === 0) continue;
 
+ const { category, group } = categorize(desc);
+ groupOf[category] = group;
+ // EVERY parsed entry is kept (for the drill-down + date-range actuals),
+ // including the current/in-progress month.
+ entries.push({ date: ymd(date), description: desc, amount: amt, category, group });
+
+ // The monthly category run-rate (which feeds the BUDGET) only includes
+ // COMPLETE months - buildMonths() excludes the current partial month, so its
+ // entries fall here with idx === undefined and are skipped from the run-rate
+ // (but they ARE in `entries` above).
  const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
  const idx = monthIndex.get(key);
  if (idx === undefined) continue;
-
- const { category, group } = categorize(desc);
  let arr = totalsByCategory.get(category);
  if (!arr) { arr = new Array(months.length).fill(0); totalsByCategory.set(category, arr); }
  arr[idx] += amt;
  countsByCategory.set(category, (countsByCategory.get(category) ?? 0) + 1);
- groupOf[category] = group;
-
- entries.push({ date: ymd(date), description: desc, amount: amt, category, group });
  }
 
  const byCategory: Record<string, CategoryMonthly> = {};
@@ -406,4 +411,41 @@ export async function getSheetExpenses(): Promise<SheetExpensesResult> {
  groupOf,
  warnings,
  };
+}
+
+// --- Outflow drill-down: PureX-paid expense entries for a date range, mapped to
+// the 13-week budget outflow lines (Payroll / Inventory / Software / Other). All
+// from the live Expenses sheet - no QuickBooks needed. Powers the variance
+// outflow drill-down + a live actual that survives a QB disconnect.
+export type ExpenseEntryDetail = { date: string; description: string; amount: number; category: string; line: string };
+function budgetLineOf(cat: SheetExpenseCategory): string | null {
+ if (cat === 'Settlement (PureX→LT)') return null;            // PureX→LT settlement is NOT OpEx
+ if (PAYROLL_GROUP_CATS.has(cat)) return 'Payroll';
+ if (INVENTORY_GROUP_CATS.has(cat)) return 'Inventory & Raw Materials';
+ if (cat === 'Software & Subscriptions') return 'Software & Subscriptions';
+ return 'Other Expenses';
+}
+export async function getExpenseEntriesForRange(start: string, end: string): Promise<{
+ start: string; end: string;
+ byLine: Record<string, { total: number; entries: ExpenseEntryDetail[] }>;
+ total: number;
+}> {
+ const sx = await getSheetExpenses();
+ const byLine: Record<string, { total: number; entries: ExpenseEntryDetail[] }> = {};
+ let total = 0;
+ for (const e of sx.entries) {
+  const ds = (e.date || '').slice(0, 10);                     // already YYYY-MM-DD
+  if (ds < start || ds > end) continue;
+  const line = budgetLineOf(e.category as SheetExpenseCategory);
+  if (!line) continue;
+  const slot = (byLine[line] ??= { total: 0, entries: [] });
+  slot.entries.push({ date: ds, description: e.description, amount: e.amount, category: e.category, line });
+  slot.total += e.amount;
+  total += e.amount;
+ }
+ for (const k of Object.keys(byLine)) {
+  byLine[k].total = +byLine[k].total.toFixed(2);
+  byLine[k].entries.sort((a, b) => b.amount - a.amount);
+ }
+ return { start, end, byLine, total: +total.toFixed(2) };
 }

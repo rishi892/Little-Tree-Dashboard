@@ -119,6 +119,42 @@ async function _weeklyExpensesUncached(weeks: Array<{ start: string; end: string
   return parseWeeklyPl(json, weeks);
 }
 
+/** Actual QB expenses (Cash P&L, all entities = Combined) for a single date
+ *  RANGE - one Total column, per budget line. By date range it INCLUDES the
+ *  current/in-progress month (unlike the monthly window). Durable-cached 1h. */
+async function _rangeExpensesUncached(start: string, end: string): Promise<{ byLine: Record<BudgetOutLine, number>; total: number }> {
+  const tok = await getValidAccessToken();
+  const url = `${QBO_API_BASE}/v3/company/${tok.realmId}/reports/ProfitAndLoss`
+    + `?start_date=${start}&end_date=${end}&accounting_method=Cash&minorversion=70`;
+  const res = await qboFetch(url, tok.accessToken);
+  if (!res.ok) throw new Error(`QBO range P&L ${res.status}: ${await res.text()}`);
+  const json = await res.json() as { Rows?: { Row?: PlNode[] } };
+  const byLine = emptyLines(); let total = 0;
+  const walk = (rows: PlNode[], ancestors: string[]) => {
+    for (const row of rows) {
+      const hasChildren = (row.Rows?.Row?.length ?? 0) > 0;
+      const section = row.Header?.ColData?.[0]?.value ?? '';
+      if (hasChildren) { walk(row.Rows!.Row!, section ? [...ancestors, section] : ancestors); continue; }
+      if (!row.ColData) continue;
+      const name = row.ColData[0]?.value ?? '';
+      if (!name) continue;
+      const path = ancestors.join(' ').toLowerCase();
+      if (/income|revenue|sales of product/.test(path) && !/cost of/.test(path)) continue;
+      const line = classifyBudgetLine(name, ancestors);
+      const v = Math.abs(parseFloat(row.ColData[row.ColData.length - 1]?.value ?? '0'));
+      if (Number.isFinite(v) && v !== 0) { byLine[line] += v; total += v; }
+    }
+  };
+  walk(json.Rows?.Row ?? [], []);
+  for (const k of Object.keys(byLine) as BudgetOutLine[]) byLine[k] = +byLine[k].toFixed(2);
+  return { byLine, total: +total.toFixed(2) };
+}
+export async function getExpensesForRange(start: string, end: string): Promise<{ byLine: Record<BudgetOutLine, number>; total: number }> {
+  const { data } = await withDurableCache(`qb-expenses-range:${start}:${end}`, 60 * 60 * 1000,
+    () => _rangeExpensesUncached(start, end), (d) => !!d && typeof (d as { total?: unknown }).total === 'number', false);
+  return data;
+}
+
 /** Actual QB expenses per week for the given Mon-Sun weeks, bucketed into the
  *  budget outflow lines. ONE P&L report. Durable-cached by range (6h). */
 export async function getWeeklyExpensesForWeeks(weeks: Array<{ start: string; end: string }>): Promise<WeekExpenseLines[]> {

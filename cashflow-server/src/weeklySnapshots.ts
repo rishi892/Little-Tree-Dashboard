@@ -110,6 +110,32 @@ export async function captureSnapshotIfNeeded(snap: WeeklySnapshot, opts: { forc
   return { wrote: true, reason: opts.force ? 'forced overwrite' : 'new snapshot' };
 }
 
+/**
+ * The per-account make-up of a Monday's opening cash (Checking, BMM, PureX bank,
+ * Due From PureX). weekly_snapshots stores only the opening TOTAL, so the
+ * breakdown is parked in the generic qb_cache table keyed by Monday — this lets
+ * the 13-week opening drill show the same 4 accounts FROZEN at their Monday
+ * values, instead of a single collapsed row.
+ */
+export type OpeningBreakdownItem = { label: string; amount: number; sub?: string };
+const openingBdKey = (monday: string) => `opening-breakdown:${monday}`;
+
+export async function getOpeningBreakdown(monday: string): Promise<OpeningBreakdownItem[] | null> {
+  try {
+    const row = await dbSelectOne<{ data: OpeningBreakdownItem[] }>('qb_cache', `key=eq.${encodeURIComponent(openingBdKey(monday))}`);
+    return Array.isArray(row?.data) ? row!.data : null;
+  } catch { return null; }
+}
+
+/** Save the Monday opening breakdown. Idempotent unless force=true (used to
+ *  refresh a stale pre-definition-change snapshot). */
+export async function saveOpeningBreakdown(monday: string, items: OpeningBreakdownItem[], force = false): Promise<void> {
+  try {
+    if (!force && (await getOpeningBreakdown(monday))) return;
+    await dbUpsert('qb_cache', { key: openingBdKey(monday), data: items, updated_at: new Date().toISOString() });
+  } catch { /* best-effort */ }
+}
+
 /** Manual delete - admin use. */
 export async function deleteSnapshot(monday: string): Promise<boolean> {
   await dbDelete('weekly_snapshots', `monday=eq.${encodeURIComponent(monday)}`);

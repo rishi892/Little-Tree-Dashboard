@@ -27,11 +27,12 @@
 
 import { getTillerBalances } from './tiller.js';
 import { getGelatoAr } from './gelatoAr.js';
+import { getPureXBank } from './cashOnHand.js';
 import { getArProjection, type ArProjectionResult } from './arProjection.js';
 import { getMappedExpenses } from './mappedExpenses.js';
 import { getCcPaymentSchedule, type CcScheduledPayment } from './ccSchedule.js';
 import { getSalesForecast, type SalesForecastResult } from './salesForecast.js';
-import { captureSnapshotIfNeeded, type WeeklySnapshot } from './weeklySnapshots.js';
+import { captureSnapshotIfNeeded, getSnapshot, type WeeklySnapshot } from './weeklySnapshots.js';
 
 const WEEKS = 13;
 
@@ -268,26 +269,39 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  : undefined;
  const warnings: string[] = [];
 
- // 1. Opening cash + CC payoff - Tiller live.
- // Business accounts only (match what Current Position counts):
- // - CRB Indirect / 7561 (primary checking)
- // - Business MM / 0910 (secondary MM)
- // Personal accounts (Regular Chk, New Personal MM) excluded.
+ // 1. Opening cash = "Cash on Hand" = the SAME 4 accounts the Current Position
+ // tab sums, so the number matches everywhere:
+ //   Checking 7561 (Tiller live) + BMM 0910 (Tiller live)
+ //   + PureX QB operating bank
+ //   + Due From PureX (Gelato Net 90)  ← folded in the Gelato section below
+ // Tiller also supplies the credit-card payoff.
  const BUSINESS_CASH_RE = /crb indirect|7561|business mm|0910/i;
- let openingCashWk1 = 0;
+ let liquidBankWk1 = 0;   // Tiller business banks (Checking + BMM)
+ let pureXBankWk1 = 0;    // PureX QB operating bank (no Tiller twin)
  let openingCashSource: CashflowSource = 'none';
+ const bankAccountsDetail: CashflowBreakdownItem[] = [];
  let ccPayoff = 0;
  try {
  const tiller = await getTillerBalances();
- openingCashWk1 = tiller.cashAccounts
- .filter((a) => BUSINESS_CASH_RE.test(a.name))
- .reduce((s, a) => s + a.balance, 0);
+ const banks = tiller.cashAccounts.filter((a) => BUSINESS_CASH_RE.test(a.name));
+ liquidBankWk1 = +banks.reduce((s, a) => s + a.balance, 0).toFixed(2);
+ for (const a of banks) bankAccountsDetail.push({ label: a.name, amount: +a.balance.toFixed(2) });
  // CC payoff: include both creditCards bucket AND loans bucket (MC Consumer
  // is categorised as a loan by Tiller but is functionally a CC).
  ccPayoff = [...tiller.creditCards, ...tiller.loans].reduce((s, a) => s + Math.abs(a.balance), 0);
  openingCashSource = 'live';
  } catch (e) {
- warnings.push(`Tiller fetch failed (${e instanceof Error ? e.message : '?'}) - opening cash and CC payoff = 0.`);
+ warnings.push(`Tiller fetch failed (${e instanceof Error ? e.message : '?'}) - opening bank cash & CC payoff = 0.`);
+ }
+ // PureX QB bank (lives in QB only, no Tiller twin) - counted as cash on hand.
+ try {
+ const px = await getPureXBank();
+ if (px) {
+ pureXBankWk1 = px.balance;
+ bankAccountsDetail.push({ label: px.name, amount: px.balance, sub: 'PureX operating bank (QB) — counted as cash on hand' });
+ }
+ } catch (e) {
+ warnings.push(`PureX bank fetch failed (${e instanceof Error ? e.message : '?'}).`);
  }
 
  // 1b. CC Payment Schedule per week - replaces the legacy Wk 1 dump with a
@@ -314,11 +328,10 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  const gelatoArCollections: number[] = new Array(WEEKS).fill(0);
  let gelatoArSource: CashflowSource = 'none';
  // Overdue Gelato batches (past their Net-97 date) are money PureX already owes
- // = the "Due From PureX (Gelato Net 90)" receivable. Per the user's model,
- // OPENING CASH = "Total Cash on Hand" = bank + Due From PureX, so the overdue
- // amount is folded into Wk1 opening cash instead of being collected again.
- // Batches not yet due still show as collections in the week they land (e.g.
- // the March batch in ~Wk3) so you can watch that money arrive.
+ // = the "Due From PureX (Gelato Net 90)" receivable. Per the user's model this
+ // is the 4th cash-on-hand account, so the overdue amount is folded into Wk1
+ // opening cash instead of being collected again. Batches not yet due still show
+ // as collections in the week they land (e.g. the March batch in ~Wk3).
  let gelatoOverdueToOpening = 0;
  const gelatoBreakdown: CashflowBreakdownItem[] = [];
  const openingGelatoBreakdown: CashflowBreakdownItem[] = [];
@@ -333,7 +346,6 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  if (remaining <= 0.5) continue;
  const issue = parseDateAny(inv.period) ?? parseDateAny(inv.comment);
  const expected = issue ? addDays(issue, 97) : ANCHOR; // Net 97
- const idx = weekIndexFor(expected, weeks);
  const idParts = [inv.invoiceNumber, inv.period].filter(Boolean).join(' · ');
  const bdItem: CashflowBreakdownItem = {
  label: inv.description || inv.invoiceNumber || inv.period,
@@ -343,10 +355,12 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  : idParts,
  };
  if (expected < ANCHOR) {
- // Already owed (past Net 97) → part of Total Cash on Hand → opening cash.
+ // Already owed (past Net 97) → part of Cash on Hand → opening cash.
  gelatoOverdueToOpening += remaining;
  openingGelatoBreakdown.push(bdItem);
- } else if (idx >= 0) {
+ } else {
+ const idx = weekIndexFor(expected, weeks);
+ if (idx < 0) continue;
  gelatoArCollections[idx] += remaining;
  gelatoBreakdown.push(bdItem);
  }
@@ -355,14 +369,28 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  } catch (e) {
  warnings.push(`Gelato AR fetch failed (${e instanceof Error ? e.message : '?'}) - Gelato AR = 0.`);
  }
+ gelatoOverdueToOpening = +gelatoOverdueToOpening.toFixed(2);
 
- // Opening cash = Total Cash on Hand = bank cash + overdue Gelato (Due From PureX).
- // bankCashWk1 keeps the pure bank balance for callers that want just liquid cash.
- const bankCashWk1 = openingCashWk1;
- openingCashWk1 = +(openingCashWk1 + gelatoOverdueToOpening).toFixed(2);
- const openingCashNote = gelatoOverdueToOpening > 0
- ? `Total Cash on Hand: bank $${Math.round(bankCashWk1).toLocaleString()} + Due From PureX (overdue Gelato already owed) $${Math.round(gelatoOverdueToOpening).toLocaleString()}`
- : `Bank cash $${Math.round(bankCashWk1).toLocaleString()}`;
+ // Opening cash = "Cash on Hand" = Checking + BMM (Tiller) + PureX bank (QB) +
+ // Due From PureX (overdue Gelato). bankCashWk1 = the spendable banks (Checking
+ // + BMM + PureX), excluding the Due From PureX receivable.
+ const bankCashWk1 = +(liquidBankWk1 + pureXBankWk1).toFixed(2);
+ // LIVE opening (cash-on-hand right now). This is the value captured into the
+ // Monday snapshot; the DISPLAYED opening is frozen to that snapshot below so it
+ // doesn't drift during the week.
+ let openingCashWk1 = +(liquidBankWk1 + pureXBankWk1 + gelatoOverdueToOpening).toFixed(2);
+ if (gelatoOverdueToOpening > 0) {
+ bankAccountsDetail.push({
+ label: 'Due From PureX (Gelato Net 90)',
+ amount: gelatoOverdueToOpening,
+ sub: 'PureX owes LT for Gelato sales (Net 90) — counted as cash',
+ });
+ }
+ let openingCashNote = gelatoOverdueToOpening > 0
+ ? `Cash on Hand: banks (Checking + BMM) $${Math.round(liquidBankWk1).toLocaleString()} + PureX bank $${Math.round(pureXBankWk1).toLocaleString()} + Due From PureX (Gelato) $${Math.round(gelatoOverdueToOpening).toLocaleString()}`
+ : `Banks (Checking + BMM) $${Math.round(liquidBankWk1).toLocaleString()} + PureX bank $${Math.round(pureXBankWk1).toLocaleString()}`;
+ // Opening-cash drill: the 4 cash accounts (Checking, BMM, PureX bank, Due From PureX).
+ let openingCashBreakdown: CashflowBreakdownItem[] = bankAccountsDetail;
 
  // 2b. Real AR projection (replaces blanket Net 30) - uses per-customer
  // collection-day patterns from paid history + future sales run-rate.
@@ -595,17 +623,24 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // week, forecast)" row folded in. So when the owner edits a sales number, the
  // logic keeps running on the EDITED value: same-week cash (~13%) AND the lagged
  // AR (~87%) both re-flow from it - not just the one cell. Future only.
- const effectiveGross = new Array(WEEKS).fill(0).map((_, i) => bWholesaleGross[i] ?? 0);
+ // Load the unified cell-edit store ONCE (future only). Used both to re-flow a
+ // Sales edit (below) AND to fold AR / expense (outflow) edits into the weekly
+ // totals + closing cash later, so an expense override changes the projection
+ // everywhere - grid, totals, dashboard chart - not just the one cell.
+ let cellEdits: Record<string, { value: number }> = {};
  if (opts.direction !== 'past') {
  try {
  const { loadCashflowEdits } = await import('./cashflowEdits.js');
- const edits = await loadCashflowEdits();
- for (let i = 0; i < WEEKS; i++) {
- const e = edits[`Sales (this week, forecast)|${weeks[i].start}`];
- if (e && Number.isFinite(e.value)) effectiveGross[i] = e.value;
- }
+ cellEdits = await loadCashflowEdits();
  } catch (e) {
- warnings.push(`Sales-edit fold failed (${e instanceof Error ? e.message : '?'}).`);
+ warnings.push(`Cashflow-edits load failed (${e instanceof Error ? e.message : '?'}).`);
+ }
+ }
+ const effectiveGross = new Array(WEEKS).fill(0).map((_, i) => bWholesaleGross[i] ?? 0);
+ if (opts.direction !== 'past') {
+ for (let i = 0; i < WEEKS; i++) {
+ const e = cellEdits[`Sales (this week, forecast)|${weeks[i].start}`];
+ if (e && Number.isFinite(e.value)) effectiveGross[i] = e.value;
  }
  }
  const sameWeekWeekly = new Array(WEEKS).fill(0);       // 13% immediate cash
@@ -790,9 +825,47 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
 
  // Exclude display-only rows (e.g. gross "Sales (this week)") from the cash
  // total - their cash is already counted via the collection rows.
- const totalInflows = weeks.map((_, i) => sum(inflows.filter((l) => !l.displayOnly).map((l) => l.values), i));
- const totalOutflows = weeks.map((_, i) => sum(outflows.map((l) => l.values), i));
+ // Fold any per-cell manual edits into the weekly totals so the projection
+ // (closing cash, dashboard chart) reflects them - same as the 13-week grid.
+ // Sales is displayOnly (excluded) + already re-flowed above, so no double-count.
+ const effCell = (label: string, i: number, base: number): number => {
+ const e = cellEdits[`${label}|${weeks[i].start}`];
+ return e && Number.isFinite(e.value) ? e.value : base;
+ };
+ const totalInflows = weeks.map((_, i) =>
+ inflows.filter((l) => !l.displayOnly).reduce((s, l) => s + effCell(l.label, i, l.values[i] ?? 0), 0));
+ const totalOutflows = weeks.map((_, i) =>
+ outflows.reduce((s, l) => s + effCell(l.label, i, l.values[i] ?? 0), 0));
  const netChange = weeks.map((_, i) => totalInflows[i] - totalOutflows[i]);
+
+ // ── Opening balance = THIS WEEK'S MONDAY balance, frozen for the week ───────
+ // The opening should be the cash on the week's Monday (the anchor), NOT a live
+ // number that drifts day-to-day. If this Monday's snapshot exists and matches
+ // the current model (same line labels), DISPLAY its frozen opening; it then
+ // re-anchors to the new actual balance next Monday. A snapshot from before a
+ // cash-definition change (different labels) is treated as stale and refreshed
+ // once with today's value. (Live cash-on-hand lives on the Current Position tab.)
+ let staleSnapshot = false;
+ if (opts.direction !== 'past') {
+ try {
+ const existing = await getSnapshot(ymd(ANCHOR));
+ if (existing) {
+ const labelsNow = JSON.stringify([...inflows.map((l) => l.label), ...outflows.map((l) => l.label)]);
+ const labelsWas = JSON.stringify([...(existing.inflows ?? []).map((l) => l.label), ...(existing.outflows ?? []).map((l) => l.label)]);
+ if (labelsNow === labelsWas && Number.isFinite(existing.openingCash)) {
+ openingCashWk1 = +existing.openingCash.toFixed(2); // freeze to Monday's value
+ openingCashBreakdown = [{
+ label: `Cash on Hand — Monday ${ymd(ANCHOR)}`,
+ amount: openingCashWk1,
+ sub: "Opening = this week's Monday start-of-week balance (frozen; updates next Monday, not daily). Live cash → Current Position.",
+ }];
+ openingCashNote = `Opening balance = cash on Monday ${ymd(ANCHOR)} (frozen for the week).`;
+ } else {
+ staleSnapshot = true; // old-model snapshot → overwrite with today's value below
+ }
+ }
+ } catch { /* snapshot read failed → keep the live opening */ }
+ }
 
  const openingCash: number[] = [];
  const closingCash: number[] = [];
@@ -832,7 +905,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  salesForecastWk1: salesForecast?.weeklyInflow[0] ?? 0,
  salesForecast13wTotal: salesForecast?.totalProjectedCash ?? 0,
  };
- await captureSnapshotIfNeeded(snap);
+ await captureSnapshotIfNeeded(snap, { force: staleSnapshot });
  } catch (e) {
  warnings.push(`Snapshot capture failed (${e instanceof Error ? e.message : '?'}).`);
  }
@@ -890,7 +963,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  openingCashSource,
  bankCashWk1,
  openingCashNote,
- openingCashBreakdown: openingGelatoBreakdown,
+ openingCashBreakdown,
  inflows: outInflows,
  outflows: outOutflows,
  ccPayments,

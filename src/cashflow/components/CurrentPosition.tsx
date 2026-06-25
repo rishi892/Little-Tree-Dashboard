@@ -94,7 +94,7 @@ export function CurrentPosition() {
  if (loading && !data) {
  return (
  <>
- <div className="page-head"><div><h1 className="page-title">Current Position - QB vs Tiller</h1></div></div>
+ <div className="page-head"><div><h1 className="page-title">Current Position</h1></div></div>
  <div className="page-sub">Loading…</div>
  </>
  );
@@ -102,7 +102,7 @@ export function CurrentPosition() {
  if (error) {
  return (
  <>
- <div className="page-head"><div><h1 className="page-title">Current Position - QB vs Tiller</h1></div></div>
+ <div className="page-head"><div><h1 className="page-title">Current Position</h1></div></div>
  <div className="error">{error}</div>
  <button className="btn ghost" onClick={() => load(true)}>Retry</button>
  </>
@@ -125,8 +125,16 @@ export function CurrentPosition() {
  // as cash on hand, so we surface it as a row and add its QB balance to the
  // total. It has no Tiller bank twin, so the balance comes straight from QB.
  const dueFromPurex = qb.intercompanyExcluded.find((a) => /due from purex|gelato net ?90/i.test(a.name)) ?? null;
+ // "PureX" QB operating bank - a real bank balance PureX holds, counted as cash
+ // on hand. It's a Bank account in QB with no Tiller twin, so its balance comes
+ // straight from QB. Exclude the Due From PureX receivable (also matches "purex").
+ const pureXBank = qb.intercompanyExcluded.find(
+ (a) => a.accountType === 'Bank' && /purex/i.test(a.name) && !/due from|gelato|net ?90/i.test(a.name),
+ ) ?? null;
  const cashTotalLive =
- cashRows.reduce((s, r) => s + (r.tiller?.balance ?? 0), 0) + (dueFromPurex?.balance ?? 0);
+ cashRows.reduce((s, r) => s + (r.tiller?.balance ?? 0), 0)
+ + (pureXBank?.balance ?? 0)
+ + (dueFromPurex?.balance ?? 0);
 
  // Build matched credit-card pairs (locked-in mappings).
  // MC Consumer can show up in either tiller.creditCards or tiller.loans.
@@ -230,6 +238,18 @@ export function CurrentPosition() {
  <td className="vendor-note">{r.notes}</td>
  </tr>
  ))}
+ {pureXBank && (
+ <tr>
+ <td><strong>PureX (operating bank)</strong></td>
+ <td>
+ <div>{pureXBank.name}</div>
+ <div className="vendor-note">QB book: {formatCurrency(pureXBank.balance, true)}</div>
+ </td>
+ <td><span className="vendor-note">QB bank · no Tiller twin</span></td>
+ <td className="num"><strong style={{ color: '#059669' }}>{formatCurrency(pureXBank.balance, true)}</strong></td>
+ <td className="vendor-note">PureX operating bank - counted as cash</td>
+ </tr>
+ )}
  {dueFromPurex && (
  <tr>
  <td><strong>Due From PureX (Gelato Net 90)</strong></td>

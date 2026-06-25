@@ -4,15 +4,18 @@ import { SalesForecastPage } from './SalesForecastPage';
 import { ArProjectionPage } from './ArProjectionPage';
 import { WeeklyRowEdit } from './WeeklyRowEdit';
 import { MonthlyForecastEdit } from './MonthlyForecastEdit';
+import { ExpenseEditPage } from './ExpenseEditPage';
 
-// "Projections" section: Sales (forecast + editable weekly sales) and AR (how AR
-// collections are derived + editable weekly AR). Each thing lives in its own
-// tab and is edited in place.
-type Tab = 'sales' | 'ar';
+// "Projections" section: Sales (forecast + editable weekly sales), AR (how AR
+// collections are derived + editable weekly AR), and Expense (editable weekly
+// outflow lines). Each lives in its own tab and is edited in place — every edit
+// flows into the 13-Week projection.
+type Tab = 'sales' | 'ar' | 'expense';
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: 'sales', label: 'Sales' },
   { key: 'ar', label: 'AR' },
+  { key: 'expense', label: 'Expense' },
 ];
 
 export function SalesHub() {
@@ -22,6 +25,7 @@ export function SalesHub() {
   useEffect(() => onCfoNav((d) => {
     if (d.tab === 'sales' || d.tab === 'forecast' || d.tab === 'edit') setTab('sales');
     else if (d.tab === 'ar') setTab('ar');
+    else if (d.tab === 'expense' || d.tab === 'expenses') setTab('expense');
   }), []);
 
   return (
@@ -49,6 +53,9 @@ export function SalesHub() {
       </div>
       <div style={{ display: tab === 'ar' ? 'block' : 'none' }}>
         {tab === 'ar' && <ArProjectionPage />}
+      </div>
+      <div style={{ display: tab === 'expense' ? 'block' : 'none' }}>
+        {tab === 'expense' && <ExpenseEditPage />}
       </div>
     </>
   );

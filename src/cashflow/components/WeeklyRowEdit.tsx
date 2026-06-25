@@ -38,10 +38,13 @@ export function WeeklyRowEdit({ rowRx, heading, sub }: { rowRx: RegExp; heading:
  // eslint-disable-next-line react-hooks/exhaustive-deps
  }, []);
 
- const label = useMemo(() => data?.inflows.find((l) => rowRx.test(l.label))?.label ?? '', [data, rowRx]);
+ // Search BOTH inflow and outflow rows, so this same editor drives Sales / AR
+ // (inflows) AND the expense lines (outflows) — all into the unified store.
+ const allRows = useMemo(() => [...(data?.inflows ?? []), ...(data?.outflows ?? [])], [data]);
+ const label = useMemo(() => allRows.find((l) => rowRx.test(l.label))?.label ?? '', [allRows, rowRx]);
  const cols = useMemo(() => {
  if (!data) return [];
- const row = data.inflows.find((l) => rowRx.test(l.label));
+ const row = allRows.find((l) => rowRx.test(l.label));
  return data.weeks.map((w, i) => ({
  wk: `Wk ${i + 1}`,
  range: `${w.start.slice(5).replace('-', '/')} – ${w.end.slice(5).replace('-', '/')}`,
@@ -141,14 +144,14 @@ export function WeeklyRowEdit({ rowRx, heading, sub }: { rowRx: RegExp; heading:
  <td className="num"><strong style={{ color: 'var(--accent-hover, #047857)' }}>{fmt0(effTot)}</strong></td>
  </tr>
  <tr>
- <td style={{ ...stickyL, fontWeight: 600 }}>Reason for that value</td>
+ <td style={{ ...stickyL, fontWeight: 600 }}>Remark</td>
  {cols.map((c) => {
  const rraw = c.key in rbuf ? rbuf[c.key] : (edits[c.key]?.reason ?? '');
  const has = !!rraw;
  return (
  <td key={c.key} style={{ padding: '3px 4px' }}>
  <input
- type="text" value={rraw} placeholder="why?"
+ type="text" value={rraw}
  onChange={(e) => setRbuf((p) => ({ ...p, [c.key]: e.target.value }))}
  title={edits[c.key]?.reason ?? ''}
  style={{

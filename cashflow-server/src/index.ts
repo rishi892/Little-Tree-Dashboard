@@ -521,6 +521,47 @@ app.get('/api/collected-detail', async (req, res, next) => {
  } catch (err) { next(err); }
 });
 
+// Outflow drill-down: PureX-paid expense entries for a date range, grouped by
+// budget outflow line. From the live Expenses sheet (no QuickBooks) - powers the
+// variance outflow detail + a QB-independent actual.
+app.get('/api/expense-entries', async (req, res, next) => {
+ try {
+ const start = String(req.query.start ?? '').slice(0, 10);
+ const end = String(req.query.end ?? '').slice(0, 10);
+ if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+ res.status(400).json({ error: 'start and end (YYYY-MM-DD) required' }); return;
+ }
+ const { getExpenseEntriesForRange } = await import('./sheetExpenses.js');
+ res.json(await getExpenseEntriesForRange(start, end));
+ } catch (err) { next(err); }
+});
+
+// Combined (PureX + Moysh) ACTUAL expense for a calendar month, on the budget's
+// basis. Settled month → deduped getMappedExpenses Combined; current month →
+// live PureX sheet (Moysh settles in QB later). Powers the variance outflow.
+app.get('/api/combined-actual', async (req, res, next) => {
+ try {
+ const month = String(req.query.month ?? '').slice(0, 7);
+ if (!/^\d{4}-\d{2}$/.test(month)) { res.status(400).json({ error: 'month (YYYY-MM) required' }); return; }
+ const { getCombinedActualForMonth } = await import('./combinedActual.js');
+ res.json(await getCombinedActualForMonth(month));
+ } catch (err) { next(err); }
+});
+
+// QB Cash P&L (Combined, all entities) per budget line for a date range -
+// includes the in-progress month. (Diagnostic / variance Combined actual.)
+app.get('/api/qb-expenses-range', async (req, res, next) => {
+ try {
+ const start = String(req.query.start ?? '').slice(0, 10);
+ const end = String(req.query.end ?? '').slice(0, 10);
+ if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+ res.status(400).json({ error: 'start and end (YYYY-MM-DD) required' }); return;
+ }
+ const { getExpensesForRange } = await import('./weeklyActuals.js');
+ res.json(await getExpensesForRange(start, end));
+ } catch (err) { next(err); }
+});
+
 
 // AR projection methodology - per-customer collection lag, expected pay-day,
 // collectibility haircut, lag curve, weekly placements. Powers the AR tab.
