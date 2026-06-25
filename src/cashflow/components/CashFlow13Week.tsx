@@ -3,11 +3,12 @@ import { createPortal } from 'react-dom';
 import {
  fetchCashflow13, fetchCashflowOverrides, saveCashflowOverrides,
  fetchCurrentMonthOverview, fetchPastWeeksGrid,
- fetchCashflowEdits, saveCashflowEdits, currentUserName,
+ fetchCashflowEdits, saveCashflowEdits, currentUserName, fetchCollectedDetail,
  type Cashflow13, type CashflowSource, type CashflowStatus, type CashflowOverrides,
  type CashflowLine, type CurrentMonthOverview, type PastWeeksGridResponse,
  type PastWeeksGridItem, type WeekActuals,
  type WeekExpenseLines, type ExpectedInflowWeek, type CashflowEdits,
+ type CollectedDetail, type CollectedInvoice,
 } from '../api';
 import { CollapsibleSection } from './CollapsibleSection';
 import InfoTip from '../../ar/dashboard/components/InfoTip.jsx';
@@ -94,8 +95,6 @@ function statusTone(s: CashflowStatus): string {
  return s === 'HEALTHY' ? 'strong' : s === 'TIGHT' ? 'warn' : 'none';
 }
 
-const POLL_INTERVAL_MS = 30_000;
-
 type Direction = 'future' | 'past';
 // Four user-facing tabs. 'budgeted' is the forward plan (direction=future);
 // 'past' / 'actual' / 'variance' are three lenses on the SAME closed-week data
@@ -123,7 +122,6 @@ export function CashFlow13Week() {
  const [salesScenario, setSalesScenario] = useState<'worst' | 'base' | 'best'>('base');
  // Row whose breakdown modal ("what's included") is open.
  const [breakdownLine, setBreakdownLine] = useState<CashflowLine | null>(null);
- const [monthOverview, setMonthOverview] = useState<CurrentMonthOverview | null>(null);
  // Future cashflow ALWAYS fetched alongside past, so the past view can use
  // LIVE Wk1 projection (latest methodology) for the in-progress current week
  // instead of the stale Monday-morning snapshot value.
@@ -143,41 +141,32 @@ export function CashFlow13Week() {
  }
  }
 
- // Load the shared cashflow cell edits (server) + refresh on focus and on a
- // light poll, so edits made here or in the Sales → Edit tab show everywhere.
+ // Shared cashflow cell edits (server). Load once, and reload only when an edit
+ // is made (here or in the Sales/AR edit tabs) - no focus/interval polling.
  useEffect(() => {
    const loadEdits = () => fetchCashflowEdits()
      .then((e) => setCashflowEdits(e ?? {}))
      .catch(() => { /* keep prior */ });
    loadEdits();
-   const poll = window.setInterval(loadEdits, 15_000);
-   window.addEventListener('focus', loadEdits);
    window.addEventListener('cashflow-edits-changed', loadEdits);   // linked: edit elsewhere
-   return () => { window.clearInterval(poll); window.removeEventListener('focus', loadEdits); window.removeEventListener('cashflow-edits-changed', loadEdits); };
+   return () => { window.removeEventListener('cashflow-edits-changed', loadEdits); };
  }, []);
 
+ // Load once per direction. Reload (silently, no spinner) ONLY when an edit is
+ // saved - so a sales edit re-flows the same-week + AR here. No focus/interval
+ // polling: it's a forecast, not a live ticker - use Refresh for a fresh pull.
  useEffect(() => {
  load(false, false, direction);
  if (direction === 'future') {
  fetchCashflowOverrides().then(setOverrides).catch(() => { /* silent */ });
  }
  if (direction === 'past') {
- fetchCurrentMonthOverview().then(setMonthOverview).catch(() => setMonthOverview(null));
- // Pull future-direction Wk1 numbers so PastCashflowTable can show the
- // CURRENT methodology's projection for the in-progress week.
  fetchCashflow13({ direction: 'future' }).then(setFutureData).catch(() => setFutureData(null));
- // Calendar-based past weeks (every Monday back, even without snapshot)
- // - this is what populates the past cashflow table so weeks without a
- // captured snapshot still show their actuals.
  fetchPastWeeksGrid(13).then(setPastGrid).catch(() => setPastGrid(null));
  }
- const poll = window.setInterval(() => load(false, true, direction), POLL_INTERVAL_MS);
- const onFocus = () => load(false, true, direction);
- window.addEventListener('focus', onFocus);
- return () => {
- window.clearInterval(poll);
- window.removeEventListener('focus', onFocus);
- };
+ const onEdit = () => load(false, true, direction);   // silent: sales edit → same-week + AR re-flow
+ window.addEventListener('cashflow-edits-changed', onEdit);
+ return () => { window.removeEventListener('cashflow-edits-changed', onEdit); };
  }, [direction]);
 
  function bufferedValue(weekIdx: number): string {
@@ -457,9 +446,6 @@ export function CashFlow13Week() {
    * past-weeks grid (snapshot = budget frozen that Monday, actuals = real). */}
  {view === 'past' && (
  <PastWeeksTable mode="budget" budgetData={data} pastGrid={pastGrid} />
- )}
- {view === 'actual' && (
- <CurrentMonthOverviewSection data={monthOverview} />
  )}
  {view === 'actual' && (
  <PastWeeksTable mode="actual" budgetData={data} pastGrid={pastGrid} />
@@ -1397,10 +1383,13 @@ function actualForInflowLine(label: string, a: WeekActuals): number | null {
  if (/gelato/i.test(label)) return a.arActuals?.gelato?.amount ?? 0;
  // Sales (this week) = gross non-Gelato invoiced (reference only, not cash).
  if (isDisplayOnlyInflow(label)) return a.salesInvoiced?.nonGelato?.amount ?? a.salesInvoiced?.total ?? 0;
- // Past AR Collections = lag collections (invoiced earlier, paid now).
- if (/past ar|lag-curve|little tree|non-gelato/i.test(label)) return a.arActuals?.nonGelato?.lagged ?? a.arActuals?.nonGelato?.amount ?? 0;
- // Collected from sales (this week) = same-week cash (invoiced & paid in this week).
- if (/collected from sales|projected|new sales/i.test(label)) return a.arActuals?.nonGelato?.sameWeek ?? 0;
+ // New sales collections = 0 in the past: every Little Tree sale in an elapsed
+ // week is already invoiced, so that cash is in the total non-Gelato collected
+ // on the AR row below. Showing it separately would double-count.
+ if (/collected from sales|new sales|projected/i.test(label)) return 0;
+ // Little Tree / Past AR = ALL non-Gelato cash collected that week (lagged +
+ // same-week), matching the by-due-date budget (which is the full collection).
+ if (/past ar|lag-curve|little tree|non-gelato/i.test(label)) return a.arActuals?.nonGelato?.amount ?? 0;
  return null;
 }
 // Live-expected inflow (by invoice terms) for an inflow line.
@@ -1420,16 +1409,15 @@ function qbActualForOutflowLine(label: string, q: WeekExpenseLines | null): numb
  return null; // Credit Card Payments etc. aren't in the expense P&L
 }
 
-const PW_STD_INFLOW = ['Gelato AR Collections (Net 97)', 'Past AR Collections (lag-curve)', 'Sales (this week, forecast)', 'Collected from sales (this week)'];
 // Display-only inflow rows: shown for context, NOT summed into the cash total.
 const isDisplayOnlyInflow = (label: string) => /^sales \(this week/i.test(label);
-const PW_TITLES = { budget: 'Past · budgeted (elapsed weeks)', actual: 'Actual · what really happened' };
+const PW_TITLES = { budget: 'Past · budgeted (elapsed weeks)', actual: 'Actual · what really happened', variance: 'Variance · actual − budgeted (per week)' };
 
 // ---- Past weeks shared table (Past = budget, Actual = real) ---------------
 // Budget: inflows = live-expected collection schedule (Gelato Net-97 + AR
 // Net-90), outflows = current run-rate. Actual: inflows = AR collected + sales
 // invoiced, outflows = QB per-category Cash P&L.
-function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actual'; budgetData: Cashflow13; pastGrid: PastWeeksGridResponse | null }) {
+function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actual' | 'variance'; budgetData: Cashflow13; pastGrid: PastWeeksGridResponse | null }) {
  if (!pastGrid) return <LoadingSection title={PW_TITLES[mode]} />;
  const items = pastGrid.items;
  if (items.length === 0) return <EmptySection title={PW_TITLES[mode]} sub="No past weeks data yet." />;
@@ -1468,17 +1456,25 @@ function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actu
  const inflowActualTotal = (it: PastWeeksGridItem): number | null =>
   it.actuals ? (it.actuals.arActuals?.total ?? 0) : null;
 
- // Each cell shows budget OR actual depending on the mode.
- const oneVal = (budget: number | null, actual: number | null): React.ReactNode => {
-  const v = mode === 'budget' ? budget : actual;
-  if (v === null) return mode === 'actual' ? TBD : muted('-');
-  if (v === 0) return muted('-');
-  return fmt(v);
+ // Each cell shows budget / actual / variance (actual − budget) by mode.
+ // lowerBetter: for OUTFLOWS, spending less than budget is good (green).
+ const oneVal = (budget: number | null, actual: number | null, lowerBetter = false): React.ReactNode => {
+  if (mode === 'budget') return budget === null || budget === 0 ? muted('-') : fmt(budget);
+  if (mode === 'actual') return actual === null ? TBD : actual === 0 ? muted('-') : fmt(actual);
+  // variance = actual − budget
+  if (actual === null) return <span style={{ color: 'var(--muted)', fontStyle: 'italic', fontSize: 11 }}>pending</span>;
+  const b = budget ?? 0;
+  const d = actual - b;
+  if (Math.round(d) === 0) return muted('0');
+  const good = lowerBetter ? d < 0 : d > 0;
+  return <span style={{ color: good ? '#059669' : 'var(--danger)', fontWeight: 600 }}>{d >= 0 ? '+' : ''}{fmt(d)}</span>;
  };
 
  const sub = mode === 'budget'
-  ? <>The <strong>budgeted forecast</strong> for each elapsed week - the SAME calculation as the Budgeted tab (Gelato Net-97 + Little Tree AR + run-rate outflows), applied to the weeks that have passed: "what the budget would have been for that week". Newest week on the left.</>
-  : <>What really happened - inflows = AR collected + sales invoiced; outflows = actual QB expenses per category (Cash P&L). Un-pulled lines show <em>entry yet to be done</em>.</>;
+  ? <>The <strong>budgeted forecast</strong> for each elapsed week - the SAME calculation as the Budgeted tab, applied to the weeks that have passed. Newest week on the left.</>
+  : mode === 'actual'
+  ? <>What really happened - inflows = AR collected + sales invoiced; outflows = actual QB expenses per category (Cash P&L). Un-pulled lines show <em>entry yet to be done</em>.</>
+  : <><strong>Actual − Budgeted</strong> for each week. Inflows: <span style={{ color: '#059669' }}>green = more cash in</span>. Outflows: <span style={{ color: '#059669' }}>green = spent less than budget</span>. <span style={{ color: 'var(--danger)' }}>Red = worse than plan</span>.</>;
 
  return (
   <div className="section">
@@ -1505,7 +1501,7 @@ function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actu
       <tr><td colSpan={1 + items.length} style={{ background: 'var(--accent-soft)', fontWeight: 700, color: '#059669' }}>CASH INFLOWS</td></tr>
       {inflowLabels.map((label) => (
        <tr key={`in-${label}`} style={isDisplayOnlyInflow(label) ? { opacity: 0.7, fontStyle: 'italic' } : undefined}>
-        <td>{label}{isDisplayOnlyInflow(label) && <span style={{ fontStyle: 'normal', fontSize: 9, fontWeight: 700, color: 'var(--muted)', marginLeft: 6, border: '1px solid var(--border)', borderRadius: 3, padding: '0 4px' }}>REF</span>}</td>
+        <td>{DISPLAY_LABELS[label] || label}{isDisplayOnlyInflow(label) && <span style={{ fontStyle: 'normal', fontSize: 9, fontWeight: 700, color: 'var(--muted)', marginLeft: 6, border: '1px solid var(--border)', borderRadius: 3, padding: '0 4px' }}>REF</span>}</td>
         {items.map((it) => <td key={it.monday} className="num">{oneVal(budgetInflow(it, label), it.actuals ? actualForInflowLine(label, it.actuals) : null)}</td>)}
        </tr>
       ))}
@@ -1517,12 +1513,12 @@ function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actu
       {outflowLabels.map((label) => (
        <tr key={`out-${label}`}>
         <td>{label}</td>
-        {items.map((it) => <td key={it.monday} className="num">{oneVal(budgetOutflow(it, label), qbActualForOutflowLine(label, it.qbExpenses))}</td>)}
+        {items.map((it) => <td key={it.monday} className="num">{oneVal(budgetOutflow(it, label), qbActualForOutflowLine(label, it.qbExpenses), true)}</td>)}
        </tr>
       ))}
       <tr className="total-row">
        <td>TOTAL OUTFLOWS</td>
-       {items.map((it) => <td key={it.monday} className="num">{oneVal(budgetOutTotal(it), it.qbExpenses ? it.qbExpenses.total : null)}</td>)}
+       {items.map((it) => <td key={it.monday} className="num">{oneVal(budgetOutTotal(it), it.qbExpenses ? it.qbExpenses.total : null, true)}</td>)}
       </tr>
       <tr className="total-row">
        <td><strong>NET CHANGE</strong></td>
@@ -1542,106 +1538,199 @@ function PastWeeksTable({ mode, budgetData, pastGrid }: { mode: 'budget' | 'actu
  );
 }
 
-// ---- Variance: two-week picker --------------------------------------------
-// Pick any ACTUAL week and any BUDGET week and compare them line by line.
+// ---- Variance: budget vs actual for one period (week or month) ------------
+// Pick ONE period; budget AND actual are both for it. Actual = real collected
+// invoices in that calendar period (month = full month, matching the AR page).
+// Click a head (AR / Gelato) to drill into exactly which invoices made it up.
+const VAR_MN = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const pad2 = (n: number) => String(n).padStart(2, '0');
 function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; pastGrid: PastWeeksGridResponse | null }) {
- const [aIdx, setAIdx] = useState(0);
- const [bIdx, setBIdx] = useState(0);
+ const [mode, setMode] = useState<'week' | 'month'>('week');
+ const [idx, setIdx] = useState(0);
+ const [detail, setDetail] = useState<CollectedDetail | null>(null);
+ const [loadingDetail, setLoadingDetail] = useState(false);
+ const [modal, setModal] = useState<{ title: string; invoices: CollectedInvoice[] } | null>(null);
+
+ const items = pastGrid?.items ?? [];
+ const monthLabel = (ym: string) => { const [y, m] = ym.split('-'); return `${VAR_MN[Number(m) - 1] ?? m} ${y}`; };
+ const periods: Array<{ label: string; sub: string; items: PastWeeksGridItem[] }> = mode === 'week'
+  ? items.map((it, i) => ({ label: `Wk -${i + 1}`, sub: `${it.monday.slice(5).replace('-', '/')} – ${it.weekEnd.slice(5).replace('-', '/')}`, items: [it] }))
+  : (() => {
+     const byYm = new Map<string, PastWeeksGridItem[]>();
+     for (const it of items) { const ym = it.monday.slice(0, 7); const a = byYm.get(ym) ?? []; a.push(it); byYm.set(ym, a); }
+     return [...byYm.entries()].map(([ym, its]) => ({ label: monthLabel(ym), sub: `${its.length} closed week${its.length === 1 ? '' : 's'}`, items: its }));
+    })();
+ const sel = periods.length ? (periods[Math.min(idx, periods.length - 1)] ?? periods[0]) : null;
+
+ // The calendar date range for the selected period. Month = 1st of month →
+ // min(today, month-end), so the current month shows month-to-date (matches the
+ // AR collections page), not just the complete Mon-Sun weeks.
+ const now = new Date();
+ const todayStr = `${now.getUTCFullYear()}-${pad2(now.getUTCMonth() + 1)}-${pad2(now.getUTCDate())}`;
+ let periodStart = '', periodEnd = '';
+ if (sel) {
+  if (mode === 'week') { periodStart = sel.items[0].monday; periodEnd = sel.items[0].weekEnd; }
+  else {
+   const ym = sel.items[0].monday.slice(0, 7); const [y, m] = ym.split('-').map(Number);
+   periodStart = `${ym}-01`;
+   const last = `${ym}-${pad2(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;
+   periodEnd = last < todayStr ? last : todayStr;
+  }
+ }
+
+ useEffect(() => {
+  if (!periodStart || !periodEnd) { setDetail(null); return; }
+  let alive = true; setLoadingDetail(true);
+  fetchCollectedDetail(periodStart, periodEnd)
+   .then((d) => { if (alive) { setDetail(d); setLoadingDetail(false); } })
+   .catch(() => { if (alive) { setDetail(null); setLoadingDetail(false); } });
+  return () => { alive = false; };
+ }, [periodStart, periodEnd]);
+
  if (!pastGrid) return <LoadingSection title="Variance" />;
- const items = pastGrid.items;
- if (items.length === 0) return <EmptySection title="Variance" sub="No past weeks data yet." />;
+ if (items.length === 0 || !sel) return <EmptySection title="Variance" sub="No past weeks data yet." />;
+
  const fmt = (n: number) => formatCurrency(Math.round(n));
  const muted = (t: string) => <span style={{ color: 'var(--muted)' }}>{t}</span>;
- const wkByMonday = new Map(budgetData.weeks.map((w, i) => [w.start, i]));
- const aItem = items[Math.min(aIdx, items.length - 1)];
- const bItem = items[Math.min(bIdx, items.length - 1)];
- const wkLabel = (it: PastWeeksGridItem, idx: number) => `Wk -${idx + 1} (${it.monday.slice(5).replace('-', '/')}–${it.weekEnd.slice(5).replace('-', '/')})`;
+ const inPeriod = (s: string) => s >= periodStart && s <= periodEnd;
 
- // Budget for a past week comes from the SAME past cashflow (`budgetData`,
- // direction=past) the Past tab uses - looked up by Monday - so inflows AND
- // outflows share one basis (the as-of forecast). The old code pulled inflows
- // from `expectedInflow` (a different, lumpy invoice-terms model that had NO
- // value for "Projected AR"), which is why the budget column came up blank.
- const budgetInLine = (it: PastWeeksGridItem, label: string): number | null => {
-  const wi = wkByMonday.get(it.monday);
-  if (wi == null) return null;
-  const line = budgetData.inflows.find((l) => l.label === label);
-  return line ? (line.values[wi] ?? 0) : 0;
+ // BUDGET: sum the past-cashflow weeks that fall COMPLETELY inside the period.
+ const budgetWk = budgetData.weeks.map((w, i) => ({ w, i })).filter(({ w }) => w.start >= periodStart && w.end <= periodEnd);
+ const sumBIn = (lbl: string) => { const line = budgetData.inflows.find((l) => l.label === lbl); return line ? budgetWk.reduce((s, x) => s + (line.values[x.i] ?? 0), 0) : 0; };
+ const sumBOut = (lbl: string) => { const line = budgetData.outflows.find((l) => l.label === lbl); return line ? budgetWk.reduce((s, x) => s + (line.values[x.i] ?? 0), 0) : 0; };
+ const bInTotal = budgetWk.reduce((s, x) => s + (budgetData.totals.inflows[x.i] ?? 0), 0);
+ const bOutTotal = budgetWk.reduce((s, x) => s + (budgetData.totals.outflows[x.i] ?? 0), 0);
+
+ // ACTUAL inflow: the REAL collected invoices in the calendar period (by paid
+ // date). AR + Gelato come straight from that detail; outflows from the closed
+ // weeks' QB expenses.
+ const gridItems = items.filter((it) => it.monday >= periodStart && it.weekEnd <= periodEnd);
+ const actualIn = (lbl: string): number | null => {
+  if (!detail) return null;
+  if (/gelato/i.test(lbl)) return detail.gelato.total;
+  if (isDisplayOnlyInflow(lbl)) { let any = false, t = 0; for (const it of gridItems) if (it.actuals) { any = true; t += actualForInflowLine(lbl, it.actuals) ?? 0; } return any ? t : null; }
+  if (/collected from sales|weekly cash|new sales/i.test(lbl)) return 0;   // folded into AR
+  if (/past ar|little tree account|lag-curve|non-gelato/i.test(lbl)) return detail.nonGelato.total;
+  return null;
  };
- const budgetOutLine = (it: PastWeeksGridItem, label: string): number | null => {
-  const wi = wkByMonday.get(it.monday);
-  if (wi == null) return null;
-  const line = budgetData.outflows.find((l) => l.label === label);
-  return line ? (line.values[wi] ?? 0) : 0;
+ const aInTotal = detail ? +(detail.nonGelato.total + detail.gelato.total).toFixed(2) : null;
+ const actualOut = (lbl: string): number | null => { let any = false, t = 0; for (const it of gridItems) if (it.qbExpenses) { any = true; t += qbActualForOutflowLine(lbl, it.qbExpenses) ?? 0; } return any ? t : null; };
+ const aOutTotal = (() => { let any = false, t = 0; for (const it of gridItems) if (it.qbExpenses) { any = true; t += it.qbExpenses.total; } return any ? t : null; })();
+
+ // Drill-down: which line opens which invoice list.
+ const drillFor = (lbl: string): CollectedInvoice[] | null => {
+  if (!detail) return null;
+  if (/gelato/i.test(lbl)) return detail.gelato.invoices;
+  if (/past ar|little tree account|lag-curve|non-gelato/i.test(lbl) || /total inflows/i.test(lbl)) return /total inflows/i.test(lbl) ? [...detail.nonGelato.invoices, ...detail.gelato.invoices] : detail.nonGelato.invoices;
+  return null;
  };
- const bWi = wkByMonday.get(bItem.monday);
- const bInTotal = bWi == null ? null : (budgetData.totals.inflows[bWi] ?? 0);
- const bOutTotal = bWi == null ? null : (budgetData.totals.outflows[bWi] ?? 0);
- // Actual total inflow = cash collected only (arActuals.total). The row split
- // (Projected AR = same-week, Little Tree AR = lagged) sums to this; adding
- // salesInvoiced would double-count gross invoicing that isn't cash.
- const aActualInTotal = aItem.actuals ? (aItem.actuals.arActuals?.total ?? 0) : null;
 
  type RowDef = { label: string; budget: number | null; actual: number | null; lowerBetter?: boolean; head?: 'in' | 'out'; strong?: boolean };
  const rows: RowDef[] = [];
  rows.push({ label: 'CASH INFLOWS', budget: null, actual: null, head: 'in' });
- for (const lbl of PW_STD_INFLOW) rows.push({ label: lbl, budget: budgetInLine(bItem, lbl), actual: aItem.actuals ? actualForInflowLine(lbl, aItem.actuals) : null });
- rows.push({ label: 'Total inflows', budget: bInTotal, actual: aActualInTotal, strong: true });
+ for (const lbl of budgetData.inflows.map((l) => l.label)) rows.push({ label: lbl, budget: sumBIn(lbl), actual: actualIn(lbl) });
+ rows.push({ label: 'Total inflows', budget: bInTotal, actual: aInTotal, strong: true });
  rows.push({ label: 'CASH OUTFLOWS', budget: null, actual: null, head: 'out' });
- for (const lbl of budgetData.outflows.map((l) => l.label)) rows.push({ label: lbl, budget: budgetOutLine(bItem, lbl), actual: qbActualForOutflowLine(lbl, aItem.qbExpenses), lowerBetter: true });
- rows.push({ label: 'Total outflows', budget: bOutTotal, actual: aItem.qbExpenses ? aItem.qbExpenses.total : null, lowerBetter: true, strong: true });
- const budNet = (bInTotal != null && bOutTotal != null) ? bInTotal - bOutTotal : null;
- const actNet = (aActualInTotal != null && aItem.qbExpenses) ? aActualInTotal - aItem.qbExpenses.total : null;
- rows.push({ label: 'NET CHANGE', budget: budNet, actual: actNet, strong: true });
+ for (const lbl of budgetData.outflows.map((l) => l.label)) rows.push({ label: lbl, budget: sumBOut(lbl), actual: actualOut(lbl), lowerBetter: true });
+ rows.push({ label: 'Total outflows', budget: bOutTotal, actual: aOutTotal, lowerBetter: true, strong: true });
+ const actNet = (aInTotal != null && aOutTotal != null) ? aInTotal - aOutTotal : null;
+ rows.push({ label: 'NET CHANGE', budget: bInTotal - bOutTotal, actual: actNet, strong: true });
 
- const dropdown = (value: number, onChange: (n: number) => void) => (
-  <select value={value} onChange={(e) => onChange(Number(e.target.value))} style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', fontSize: 13 }}>
-   {items.map((it, i) => <option key={it.monday} value={i}>{wkLabel(it, i)}</option>)}
-  </select>
- );
  const deltaCell = (budget: number | null, actual: number | null, lowerBetter = false): React.ReactNode => {
   if (budget === null && actual === null) return muted('-');
   const b = budget ?? 0;
-  if (actual === null) return <span className="vendor-note" style={{ fontStyle: 'italic' }}>pending</span>;
+  if (actual === null) return loadingDetail ? muted('…') : <span className="vendor-note" style={{ fontStyle: 'italic' }}>pending</span>;
   const d = actual - b;
   const good = lowerBetter ? d <= 0 : d >= 0;
   const tone = good ? '#059669' : 'var(--danger)';
   const pct = b !== 0 ? Math.round((actual / b) * 100) : null;
   return <span style={{ color: tone, fontWeight: 600 }}>{d >= 0 ? '+' : ''}{fmt(d)}{pct !== null ? ` · ${pct}%` : ''}</span>;
  };
+ const toggleBtn = (m: 'week' | 'month', txt: string) => (
+  <button onClick={() => { setMode(m); setIdx(0); }} style={{ padding: '6px 16px', borderRadius: 8, border: 'none', cursor: 'pointer', fontWeight: mode === m ? 700 : 500, background: mode === m ? 'var(--accent, #047857)' : 'transparent', color: mode === m ? '#fff' : 'var(--muted)' }}>{txt}</button>
+ );
+ const periodTxt = mode === 'month' ? `${periodStart.slice(5).replace('-', '/')}–${periodEnd.slice(5).replace('-', '/')}` : sel.sub;
 
  return (
   <div className="section">
    <div className="section-head"><div>
-    <div className="section-title">Variance · budget vs actual (pick weeks)</div>
-    <div className="section-sub">Choose any <strong>budget</strong> week and any <strong>actual</strong> week and compare them line by line. Green Δ = better than plan (more in, less out, higher net).</div>
+    <div className="section-title">Variance · budget vs actual</div>
+    <div className="section-sub">Pick a <strong>{mode}</strong> — budget AND actual are both for it. Actual = real collected invoices in that period (month = full month-to-date, matches the AR page). <strong>Click a green-underlined line</strong> to see exactly which invoices made it up.</div>
    </div></div>
-   <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginBottom: 14, alignItems: 'center' }}>
-    <label style={{ fontSize: 13 }}>Budget week: {dropdown(bIdx, setBIdx)}</label>
-    <span style={{ color: 'var(--muted)' }}>vs</span>
-    <label style={{ fontSize: 13 }}>Actual week: {dropdown(aIdx, setAIdx)}</label>
+   <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 14, alignItems: 'center' }}>
+    <div style={{ display: 'inline-flex', background: 'var(--surface, #f1f5f9)', borderRadius: 10, padding: 3, gap: 2 }}>
+     {toggleBtn('week', 'Week')}
+     {toggleBtn('month', 'Month')}
+    </div>
+    <label style={{ fontSize: 13 }}>{mode === 'week' ? 'Week' : 'Month'}:{' '}
+     <select value={Math.min(idx, periods.length - 1)} onChange={(e) => setIdx(Number(e.target.value))} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', fontSize: 13 }}>
+      {periods.map((p, i) => <option key={i} value={i}>{p.label}{p.sub ? ` · ${p.sub}` : ''}</option>)}
+     </select>
+    </label>
+    {loadingDetail && <span style={{ fontSize: 12, color: 'var(--muted)' }}>loading actuals…</span>}
    </div>
    <div className="table-wrap">
     <table className="data-table" style={{ fontSize: 12 }}>
      <thead><tr>
       <th>Line item</th>
-      <th className="num">Budget<div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}>{wkLabel(bItem, Math.min(bIdx, items.length - 1))}</div></th>
-      <th className="num">Actual<div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}>{wkLabel(aItem, Math.min(aIdx, items.length - 1))}</div></th>
+      <th className="num">Budget<div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}>{sel.label}</div></th>
+      <th className="num">Actual<div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}>{periodTxt}</div></th>
       <th className="num">Δ</th>
      </tr></thead>
      <tbody>
-      {rows.map((r, i) => r.head ? (
-       <tr key={i}><td colSpan={4} style={{ background: r.head === 'in' ? 'var(--accent-soft)' : 'var(--danger-soft)', fontWeight: 700, color: r.head === 'in' ? '#059669' : 'var(--danger)' }}>{r.label}</td></tr>
-      ) : (
-       <tr key={i} className={r.strong ? 'total-row' : undefined} style={isDisplayOnlyInflow(r.label) ? { opacity: 0.7, fontStyle: 'italic' } : undefined}>
-        <td>{r.strong ? <strong>{r.label}</strong> : r.label}{isDisplayOnlyInflow(r.label) && <span style={{ fontStyle: 'normal', fontSize: 9, fontWeight: 700, color: 'var(--muted)', marginLeft: 6, border: '1px solid var(--border)', borderRadius: 3, padding: '0 4px' }}>REF</span>}</td>
-        <td className="num">{r.budget === null || r.budget === 0 ? muted('-') : fmt(r.budget)}</td>
-        <td className="num">{r.actual === null ? <span className="vendor-note" style={{ fontStyle: 'italic' }}>pending</span> : (r.actual === 0 ? muted('-') : fmt(r.actual))}</td>
-        <td className="num">{deltaCell(r.budget, r.actual, r.lowerBetter)}</td>
-       </tr>
-      ))}
+      {rows.map((r, i) => {
+       if (r.head) return <tr key={i}><td colSpan={4} style={{ background: r.head === 'in' ? 'var(--accent-soft)' : 'var(--danger-soft)', fontWeight: 700, color: r.head === 'in' ? '#059669' : 'var(--danger)' }}>{r.label}</td></tr>;
+       const inv = drillFor(r.label);
+       const canDrill = !!inv && inv.length > 0;
+       return (
+        <tr key={i} className={r.strong ? 'total-row' : undefined} style={{ ...(isDisplayOnlyInflow(r.label) ? { opacity: 0.7, fontStyle: 'italic' } : {}), ...(canDrill ? { cursor: 'pointer' } : {}) }}
+         onClick={canDrill ? () => setModal({ title: `${DISPLAY_LABELS[r.label] || r.label} collected · ${sel.label}`, invoices: inv! }) : undefined}>
+         <td>
+          {r.strong ? <strong>{DISPLAY_LABELS[r.label] || r.label}</strong> : (DISPLAY_LABELS[r.label] || r.label)}
+          {isDisplayOnlyInflow(r.label) && <span style={{ fontStyle: 'normal', fontSize: 9, fontWeight: 700, color: 'var(--muted)', marginLeft: 6, border: '1px solid var(--border)', borderRadius: 3, padding: '0 4px' }}>REF</span>}
+          {canDrill && <span style={{ marginLeft: 8, fontSize: 10, color: 'var(--accent-hover, #047857)', borderBottom: '1px solid currentColor' }}>{inv!.length} invoices →</span>}
+         </td>
+         <td className="num">{r.budget === null || r.budget === 0 ? muted('-') : fmt(r.budget)}</td>
+         <td className="num">{r.actual === null ? (loadingDetail ? muted('…') : <span className="vendor-note" style={{ fontStyle: 'italic' }}>pending</span>) : (r.actual === 0 ? muted('-') : fmt(r.actual))}</td>
+         <td className="num">{deltaCell(r.budget, r.actual, r.lowerBetter)}</td>
+        </tr>
+       );
+      })}
      </tbody>
     </table>
+   </div>
+   {modal && createPortal(<CollectedModal title={modal.title} invoices={modal.invoices} onClose={() => setModal(null)} />, document.body)}
+  </div>
+ );
+}
+
+// Drill-down modal: the actual invoices collected (paid) in the selected period.
+function CollectedModal({ title, invoices, onClose }: { title: string; invoices: CollectedInvoice[]; onClose: () => void }) {
+ const fmt0 = (n: number) => formatCurrency(Math.round(n));
+ const total = invoices.reduce((s, i) => s + i.paid, 0);
+ return (
+  <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}>
+   <div onClick={(e) => e.stopPropagation()} style={{ background: 'var(--bg, #fff)', borderRadius: 12, maxWidth: 920, width: '100%', maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: '1px solid var(--border)' }}>
+     <div><strong style={{ fontSize: 16 }}>{title}</strong> <span style={{ color: 'var(--muted)' }}>· {invoices.length} invoices · {fmt0(total)}</span></div>
+     <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 22, cursor: 'pointer', color: 'var(--muted)' }}>×</button>
+    </div>
+    <div style={{ overflow: 'auto', padding: '0 4px' }}>
+     <table className="data-table">
+      <thead><tr><th style={{ minWidth: 220 }}>Customer</th><th>Invoice</th><th>Invoiced</th><th>Paid on</th><th className="num">Amount</th></tr></thead>
+      <tbody>
+       {invoices.slice(0, 500).map((inv, i) => (
+        <tr key={`${inv.invoiceNumber}-${i}`}>
+         <td>{inv.customer}</td>
+         <td>{inv.invoiceNumber}</td>
+         <td style={{ whiteSpace: 'nowrap', color: 'var(--muted)' }}>{inv.invoiceDate}</td>
+         <td style={{ whiteSpace: 'nowrap' }}>{inv.paidDate}</td>
+         <td className="num"><strong>{fmt0(inv.paid)}</strong></td>
+        </tr>
+       ))}
+      </tbody>
+     </table>
+    </div>
    </div>
   </div>
  );

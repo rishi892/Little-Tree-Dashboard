@@ -1966,6 +1966,39 @@ export async function fetchArOpenInvoices(): Promise<ArOpenResult> {
  return res.json();
 }
 
+// AR collections history — month × year grid + seasonality (the trend behind the projection).
+export type ArCollectionsHistory = {
+ asOf: string;
+ years: number[];
+ grid: Array<Record<number, number>>;          // grid[month 0-11][year] = $ collected
+ yearTotals: Record<number, number>;
+ seasonality: Array<{ month: number; index: number; avg: number }>;
+ overallMonthlyAvg: number;
+ recentMonthlyAvg: number;
+ recentWeeklyAvg: number;
+ lagCurve: number[];          // share collected wk0 (same week), +1, … +12
+ lagCumulative: number[];     // cumulative collected by week k
+ recoveryBands: Array<{ bucket: string; recovery: number; paid: number; writeOff: number; n: number }>;
+};
+export async function fetchArCollectionsHistory(): Promise<ArCollectionsHistory> {
+ const res = await fetch('/api/ar-collections-history');
+ if (!res.ok) throw new Error(`Failed to load AR collections history: ${res.status}`);
+ return res.json();
+}
+
+// Collected detail for a date range (drill-down: which invoices made up the actual).
+export type CollectedInvoice = { invoiceNumber: string; customer: string; channel: string; invoiceDate: string; paidDate: string; amount: number; paid: number };
+export type CollectedDetail = {
+ start: string; end: string;
+ nonGelato: { total: number; count: number; invoices: CollectedInvoice[] };
+ gelato: { total: number; count: number; invoices: CollectedInvoice[] };
+};
+export async function fetchCollectedDetail(start: string, end: string): Promise<CollectedDetail> {
+ const res = await fetch(`/api/collected-detail?start=${start}&end=${end}`);
+ if (!res.ok) throw new Error(`Failed to load collected detail: ${res.status}`);
+ return res.json();
+}
+
 // AR projection methodology (Projections → AR tab). Per-customer collection lag,
 // collectibility haircut, lag curve, weekly placements.
 export type ArLagCurvePoint = { lag: number; pctOfInvoiced: number };
@@ -2013,7 +2046,7 @@ export function currentUserName(): string {
 
 // Unified cashflow cell edits (inflow Sales/AR + outflow expenses), persisted in
 // Supabase with attribution. Key = `${rowLabel}|${weekStart}`.
-export type CellEdit = { value: number; by: string; at: string };
+export type CellEdit = { value: number; by: string; at: string; reason?: string };
 export type CashflowEdits = Record<string, CellEdit>;
 
 export async function fetchCashflowEdits(): Promise<CashflowEdits> {
@@ -2022,11 +2055,11 @@ export async function fetchCashflowEdits(): Promise<CashflowEdits> {
  return res.json();
 }
 
-export async function saveCashflowEdits(set: Record<string, number>, clear: string[] = []): Promise<CashflowEdits> {
+export async function saveCashflowEdits(set: Record<string, number>, clear: string[] = [], reasons: Record<string, string> = {}): Promise<CashflowEdits> {
  const res = await fetch('/api/cashflow-edits', {
  method: 'POST',
  headers: { 'Content-Type': 'application/json' },
- body: JSON.stringify({ set, clear, by: currentUserName() }),
+ body: JSON.stringify({ set, clear, by: currentUserName(), reasons }),
  });
  if (!res.ok) throw new Error(`Failed to save cashflow edits: ${res.status}`);
  const data = await res.json();

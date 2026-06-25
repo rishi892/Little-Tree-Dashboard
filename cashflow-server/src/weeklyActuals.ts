@@ -134,6 +134,7 @@ export async function getWeeklyExpensesForWeeks(weeks: Array<{ start: string; en
   return data;
 }
 
+
 // --- 2. Expected inflow schedule for arbitrary weeks ----------------------
 
 export type ExpectedInflowWeek = { gelato: number; other: number; total: number };

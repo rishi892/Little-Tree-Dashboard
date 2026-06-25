@@ -14,7 +14,7 @@
 
 import { dbSelectOne, dbUpsert } from './db.js';
 
-export type CellEdit = { value: number; by: string; at: string };
+export type CellEdit = { value: number; by: string; at: string; reason?: string };
 export type CashflowEdits = Record<string, CellEdit>;
 
 const CACHE_KEY = 'cashflow-cell-edits';
@@ -41,12 +41,21 @@ export async function applyCashflowEdits(
  set: Record<string, number>,
  clear: string[],
  by: string,
+ reasons: Record<string, string> = {},
 ): Promise<CashflowEdits> {
  const at = new Date().toISOString();
  const cur: CashflowEdits = { ...(await loadCashflowEdits()) };
  for (const [k, v] of Object.entries(set ?? {})) {
   const n = Number(v);
-  if (k && Number.isFinite(n)) cur[k] = { value: +n.toFixed(2), by: (by || 'Unknown').slice(0, 60), at };
+  if (k && Number.isFinite(n)) {
+   const reason = typeof reasons[k] === 'string' ? reasons[k].slice(0, 280) : undefined;
+   cur[k] = { value: +n.toFixed(2), by: (by || 'Unknown').slice(0, 60), at, ...(reason ? { reason } : {}) };
+  }
+ }
+ // Reason-only updates (value unchanged) - keep the existing value/attribution, set the reason.
+ for (const [k, r] of Object.entries(reasons ?? {})) {
+  if (k in (set ?? {})) continue;
+  if (cur[k]) cur[k] = { ...cur[k], reason: typeof r === 'string' && r.trim() ? r.slice(0, 280) : undefined, by: (by || cur[k].by), at };
  }
  for (const k of clear ?? []) delete cur[k];
  cache = cur;

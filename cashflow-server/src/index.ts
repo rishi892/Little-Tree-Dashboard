@@ -130,7 +130,7 @@ app.post('/api/disconnect', async (_req, res) => {
 function invalidateExpenseCaches() {
  // Drop the durable caches that depend on QB expense detail / sheet mapping so
  // the next read rebuilds them.
- for (const k of ['expense-detail', 'monthly-opex', 'cashflow-13week:v2:future', 'cashflow-13week:v2:past',
+ for (const k of ['expense-detail', 'monthly-opex', 'cashflow-13week:v6:future', 'cashflow-13week:v6:past',
    'mapped-expenses:PureX:14', 'mapped-expenses:Moysh:14']) dropDurableMem(k);
 }
 
@@ -333,17 +333,35 @@ app.get('/api/expense-detail', async (req, res, next) => {
 
 // 13-week is durable-cached (5 min, stale-while-revalidate): outflows come from
 // the shared cached expense source, inflows from the live sheet.
-const getCashflow13WeekCached = (direction: 'future' | 'past', force = false) =>
- withDurableCache(
- // v2: bumped after the as-of past forecast + same-week/lagged split. Old
- // `cashflow-13week:<dir>` rows in qb_cache held a pre-change zero-inflow
- // result; bumping the key abandons them so cold starts recompute fresh.
- `cashflow-13week:v2:${direction}`,
+// Fingerprint the cashflow cell-edits so an edit busts the cache: when the owner
+// edits a sales week, the backend re-folds it into the same-week + lagged-AR
+// split, so the cached result must refresh (the logic keeps running on the edit).
+async function cashflowEditsFingerprint(): Promise<string> {
+ try {
+ const { loadCashflowEdits } = await import('./cashflowEdits.js');
+ const edits = await loadCashflowEdits();
+ const keys = Object.keys(edits).sort();
+ let h = 5381;
+ for (const k of keys) {
+ const s = `${k}:${edits[k].value}:${edits[k].at ?? ''}`;
+ for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+ }
+ return `${keys.length}-${h.toString(36)}`;
+ } catch { return '0'; }
+}
+
+const getCashflow13WeekCached = async (direction: 'future' | 'past', force = false) => {
+ // v6: cache key carries an edits fingerprint (future) so a sales edit re-flows
+ // the same-week + lagged-AR split immediately instead of after the 5-min TTL.
+ const fp = direction === 'future' ? await cashflowEditsFingerprint() : '0';
+ return withDurableCache(
+ `cashflow-13week:v6:${direction}:${fp}`,
  5 * 60 * 1000,
  () => getCashflow13Week(direction === 'past' ? { direction: 'past' } : undefined),
  (d) => Array.isArray((d as { weeks?: unknown[] }).weeks) && (d as { weeks: unknown[] }).weeks.length > 0,
  force,
  );
+};
 
 app.get('/api/cashflow-13week', async (req, res, next) => {
  try {
@@ -417,8 +435,8 @@ app.post('/api/cashflow-overrides', async (req, res, next) => {
  };
  await saveCfOverrides(next);
  // invalidate the 13-week durable cache so the next read picks up new overrides
- dropDurableMem('cashflow-13week:v2:future');
- dropDurableMem('cashflow-13week:v2:past');
+ dropDurableMem('cashflow-13week:v6:future');
+ dropDurableMem('cashflow-13week:v6:past');
  res.json(next);
  } catch (err) { next(err); }
 });
@@ -480,6 +498,30 @@ app.get('/api/ar-open-invoices', async (_req, res, next) => {
  } catch (err) { next(err); }
 });
 
+// AR collections history - month x year grid + seasonality (LT Financials paid
+// history, non-Gelato). The "kitna AR wapas aata hai" trend behind the AR projection.
+app.get('/api/ar-collections-history', async (_req, res, next) => {
+ try {
+ const { getArCollectionsHistory } = await import('./arCollectionsHistory.js');
+ res.json(await getArCollectionsHistory());
+ } catch (err) { next(err); }
+});
+
+// Collected detail for any date range (by paid date) - the invoices behind the
+// "actual collected" number. Powers the variance drill-down + calendar-period actual.
+app.get('/api/collected-detail', async (req, res, next) => {
+ try {
+ const start = String(req.query.start ?? '').slice(0, 10);
+ const end = String(req.query.end ?? '').slice(0, 10);
+ if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+ res.status(400).json({ error: 'start and end (YYYY-MM-DD) required' }); return;
+ }
+ const { getCollectedDetail } = await import('./snapshotActuals.js');
+ res.json(await getCollectedDetail(start, end));
+ } catch (err) { next(err); }
+});
+
+
 // AR projection methodology - per-customer collection lag, expected pay-day,
 // collectibility haircut, lag curve, weekly placements. Powers the AR tab.
 app.get('/api/ar-projection', async (_req, res, next) => {
@@ -513,12 +555,14 @@ app.get('/api/cashflow-edits', async (_req, res, next) => {
 app.post('/api/cashflow-edits', async (req, res, next) => {
  try {
  const { applyCashflowEdits } = await import('./cashflowEdits.js');
- const body = (req.body ?? {}) as { set?: Record<string, unknown>; clear?: unknown[]; by?: unknown };
+ const body = (req.body ?? {}) as { set?: Record<string, unknown>; clear?: unknown[]; by?: unknown; reasons?: Record<string, unknown> };
  const set: Record<string, number> = {};
  for (const [k, v] of Object.entries(body.set ?? {})) { const n = Number(v); if (k && Number.isFinite(n)) set[k] = n; }
  const clear = Array.isArray(body.clear) ? body.clear.filter((k): k is string => typeof k === 'string') : [];
  const by = typeof body.by === 'string' ? body.by : 'Unknown';
- res.json(await applyCashflowEdits(set, clear, by));
+ const reasons: Record<string, string> = {};
+ for (const [k, v] of Object.entries(body.reasons ?? {})) { if (k && typeof v === 'string') reasons[k] = v; }
+ res.json(await applyCashflowEdits(set, clear, by, reasons));
  } catch (err) { next(err); }
 });
 

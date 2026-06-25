@@ -89,6 +89,10 @@ export type CashflowResult = {
  inventoryPerWeek: number;
  otherPerWeek: number;
  };
+ /** CFO reconciliation: Little Tree AR balance roll-forward, week by week.
+  *  opening + newInvoices (gross sales) − collected (AR + same-week cash) = ending.
+  *  Future direction only. */
+ arReconciliation?: Array<{ opening: number; newInvoices: number; collected: number; ending: number }>;
  warnings: string[];
 };
 
@@ -380,8 +384,8 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // window because the Invoice Tracker has no real paid-date column).
  if (opts.direction !== 'past') {
  try {
- const { getArWeeklyCollection } = await import('./arDashboardOpen.js');
- const arWk = await getArWeeklyCollection(weeks.map((w) => ({ start: w.start, end: w.end })));
+ const { getCustomerWiseArCollection } = await import('./arDashboardOpen.js');
+ const arWk = await getCustomerWiseArCollection(weeks.map((w) => ({ start: w.start, end: w.end })));
  for (let i = 0; i < WEEKS; i++) nonGelatoArCollections[i] = arWk[i] ?? 0;
  if (arWk.some((v) => v > 0)) nonGelatoArSource = 'live';
  } catch (e) {
@@ -402,10 +406,20 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  gelatoArCollections[i] = exp[i]?.gelato ?? 0;
  }
  if (exp.some((x) => x.gelato > 0)) gelatoArSource = 'computed';
- // (Little Tree AR is predicted below from the sales run-rate, not the open-
- // invoice estimate, which reads ~0 for already-collected past weeks.)
  } catch (e) {
  warnings.push(`Past expected-inflow failed (${e instanceof Error ? e.message : '?'}).`);
+ }
+ // Little Tree AR for the past = EVERY non-Gelato invoice (paid + open) placed
+ // at its due date, so each elapsed week shows the real expected collection -
+ // following the same by-due-date trend as the future row (not the legacy
+ // arProjection lag-curve, which read ~0 for already-collected weeks).
+ try {
+ const { getBudgetNonGelatoArByWeek } = await import('./arDashboardOpen.js');
+ const arWk = await getBudgetNonGelatoArByWeek(weeks.map((w) => ({ start: w.start, end: w.end })));
+ for (let i = 0; i < WEEKS; i++) nonGelatoArCollections[i] = arWk[i] ?? 0;
+ if (arWk.some((v) => v > 0)) nonGelatoArSource = 'live';
+ } catch (e) {
+ warnings.push(`Past AR-by-due-date failed (${e instanceof Error ? e.message : '?'}).`);
  }
  }
 
@@ -550,17 +564,6 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  const projectedRaw = new Array(WEEKS).fill(0).map((_, i) =>
   +(bWholesale[i] ?? 0).toFixed(2),
  );
- // For the PAST view the forecast above is already anchored AS-OF the window
- // start (getSalesForecast + getArProjection received asOf), so Projected sales
- // + Little Tree AR are the proper "budget we'd have made then" - no override.
- const projectedSalesWeekly = projectedRaw;
- const projectedSalesSource: CashflowSource = projectedSalesWeekly.some((v) => v > 0)
- ? 'computed'
- : 'none';
- const projectedSalesNote = salesForecast
- ? `Little Tree (wholesale) new-sales cash only: $${Math.round(projectedSalesWeekly.reduce((s,v)=>s+v,0)).toLocaleString()} over 13 weeks. Private Label & Gelato excluded from this row.`
- : 'Forecast unavailable';
-
  // --- User's model: split new-sales collections into same-week (immediate) vs
  // lagged. "Projected AR from new sales" should be only the cash that arrives
  // the SAME week the sale is invoiced (sale hua aur usi week paisa aaya). The
@@ -577,27 +580,75 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  warnings.push(`Same-week rate failed (${e instanceof Error ? e.message : '?'}) - new sales treated as all-lag.`);
  }
  // AR Collections row = the open-AR collection ONLY (from the AR dashboard's
- // $567k). New-sales cash stays its own row ("New sales collections") - we no
- // longer fold the lagged part into AR, so the AR number stays clean and
- // matches the dashboard. (Same-week rate kept only for the row note.)
- void bWholesaleGross;
+ // $567k). New-sales cash stays its own row ("New sales collections").
  if (nonGelatoArCollections.some((v) => v > 0)) nonGelatoArSource = nonGelatoArSource === 'none' ? 'computed' : nonGelatoArSource;
  const sameWeekPct = (sameWeekRate * 100).toFixed(0);
+
+ // --- New-sales cash split (CFO view). Of each week's GROSS Little Tree sales
+ // (= the Sales Projection page), ~13% lands as cash the SAME week invoiced; the
+ // other ~87% becomes a RECEIVABLE and collects later via the empirical lag
+ // curve. The lagged part is real AR, so it is FOLDED INTO "Little Tree Account
+ // Receivable" below - not shown as separate "sales cash". PAST = 0 (those sales
+ // are already invoiced and counted in the by-due-date AR row above).
+ void projectedRaw; void bWholesale;
+ // EFFECTIVE gross = forecast gross with any manual edits to the "Sales (this
+ // week, forecast)" row folded in. So when the owner edits a sales number, the
+ // logic keeps running on the EDITED value: same-week cash (~13%) AND the lagged
+ // AR (~87%) both re-flow from it - not just the one cell. Future only.
+ const effectiveGross = new Array(WEEKS).fill(0).map((_, i) => bWholesaleGross[i] ?? 0);
+ if (opts.direction !== 'past') {
+ try {
+ const { loadCashflowEdits } = await import('./cashflowEdits.js');
+ const edits = await loadCashflowEdits();
+ for (let i = 0; i < WEEKS; i++) {
+ const e = edits[`Sales (this week, forecast)|${weeks[i].start}`];
+ if (e && Number.isFinite(e.value)) effectiveGross[i] = e.value;
+ }
+ } catch (e) {
+ warnings.push(`Sales-edit fold failed (${e instanceof Error ? e.message : '?'}).`);
+ }
+ }
+ const sameWeekWeekly = new Array(WEEKS).fill(0);       // 13% immediate cash
+ const laggedNewSalesWeekly = new Array(WEEKS).fill(0); // 87% ages into AR, collects later
+ if (opts.direction !== 'past') {
+ try {
+ const { getCollectionLagCurve } = await import('./snapshotActuals.js');
+ const curve = await getCollectionLagCurve();
+ const tail = curve.slice(1); const tsum = tail.reduce((s, v) => s + v, 0) || 1;
+ const laggedProfile = tail.map((v) => v / tsum);            // ~87% spread over wk+1..+12
+ for (let w = 0; w < WEEKS; w++) {
+ const gross = effectiveGross[w] ?? 0;
+ sameWeekWeekly[w] += gross * sameWeekRate;                  // same-week (~13%)
+ const lagAmt = gross * (1 - sameWeekRate);
+ for (let k = 0; k < laggedProfile.length && w + 1 + k < WEEKS; k++) laggedNewSalesWeekly[w + 1 + k] += lagAmt * laggedProfile[k];
+ }
+ } catch (e) {
+ warnings.push(`New-sales lag split failed (${e instanceof Error ? e.message : '?'}).`);
+ }
+ }
+ // Snapshot the EXISTING open-AR collection ($567k, customer-wise) BEFORE folding
+ // in the new-sales receivable, so the breakdown + reconciliation can separate them.
+ const openArWeekly = nonGelatoArCollections.slice();
+ // Little Tree Account Receivable = existing open-AR collection + the lagged
+ // (aged-into-AR) share of new sales. Both ARE receivable collecting customer-wise.
+ for (let i = 0; i < WEEKS; i++) nonGelatoArCollections[i] = +(openArWeekly[i] + laggedNewSalesWeekly[i]).toFixed(2);
+ const projectedSalesWeekly = sameWeekWeekly.map((v) => +v.toFixed(2));   // same-week-only row
+ const projectedSalesSource: CashflowSource = projectedSalesWeekly.some((v) => v > 0) ? 'computed' : 'none';
+ const projectedSalesNote = salesForecast
+ ? `Same-week cash: ${sameWeekPct}% of each week's gross Little Tree sales lands the same week it's invoiced. The other ${100 - +sameWeekPct}% ages into Little Tree Account Receivable and collects later. $${Math.round(projectedSalesWeekly.reduce((s, v) => s + v, 0)).toLocaleString()} over 13 weeks.`
+ : 'Forecast unavailable';
 
  // --- Gross new-sales forecast per week (non-Gelato), for the DISPLAY-ONLY
  // "Sales (this week)" row. Distribute each bucket's gross MONTHLY forecast
  // (forecastedSales) across that month's days, then sum the days in each week.
  // This is the "itna sales hoga" number - NOT added to cash (the cash from it
  // is already captured by the same-week + lagged AR rows). Context only.
+ // Use EFFECTIVE gross (forecast + any sales edits folded in) so the Sales row,
+ // the same-week/lagged split, AND the AR reconciliation's new-invoices all move
+ // together when the owner edits a sales week. Display-only (cash is in the
+ // same-week + lagged AR rows).
  const salesGrossWeekly: number[] = new Array(WEEKS).fill(0);
- if (salesForecast) {
- // Use the SAME week-of-month gross distribution the Sales Projection page
- // shows (buckets[].weeklyGross, built from real invoice dates) so this row
- // matches that tab exactly - instead of an even day-split. Display-only
- // (not added to cash; the cash is already in the same-week + lagged rows).
- const wg = salesForecast.buckets.wholesale.weeklyGross ?? [];
- for (let i = 0; i < WEEKS; i++) salesGrossWeekly[i] = +(wg[i] ?? 0).toFixed(2);
- }
+ for (let i = 0; i < WEEKS; i++) salesGrossWeekly[i] = +(effectiveGross[i] ?? 0).toFixed(2);
  const salesGrossSource: CashflowSource = salesGrossWeekly.some((v) => v > 0) ? 'computed' : 'none';
 
  // --- Breakdowns: the underlying line items behind each row (for the click
@@ -632,14 +683,14 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // "total $X" equals the row total (no more mismatch).
  const grossSales13w = salesGrossWeekly.reduce((s, v) => s + v, 0);
  const sameWeekCash13w = projectedSalesWeekly.reduce((s, v) => s + v, 0);
- const openArCollections13w = arProjection ? arProjection.arByWeek.reduce((s, v) => s + v, 0) : 0;
- const newSalesCashTotal = bWholesale.reduce((s, v) => s + (v ?? 0), 0);
- const laggedNewSales13w = Math.max(0, newSalesCashTotal - sameWeekCash13w);
+ const openArCollections13w = openArWeekly.reduce((s, v) => s + v, 0);
+ const laggedNewSales13w = laggedNewSalesWeekly.reduce((s, v) => s + v, 0);
 
- // Past AR row = open-invoice collections + the lagged share of new sales.
+ // Little Tree AR row = existing open-invoice collections + the lagged share of
+ // new sales that ages into AR (both collecting customer-wise).
  const pastArBreakdown: CashflowBreakdownItem[] = [
- { label: 'Open invoices (collectible)', amount: +openArCollections13w.toFixed(2), sub: '13-wk collections · haircut applied' },
- { label: 'Lagged new sales', amount: +laggedNewSales13w.toFixed(2), sub: `the ${100 - +sameWeekPct}% collecting after the sale week` },
+ { label: 'Existing open invoices (today’s $567k AR)', amount: +openArCollections13w.toFixed(2), sub: 'collecting customer-wise by paid-history timing' },
+ { label: 'New sales that aged into AR', amount: +laggedNewSales13w.toFixed(2), sub: `the ${100 - +sameWeekPct}% of new sales collecting after the sale week` },
  ].filter((x) => x.amount > 0.5);
 
  // Little Tree Sales (gross, reference) and Weekly Cash Collection (same-week).
@@ -662,7 +713,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  {
  label: 'Past AR Collections (lag-curve)',
  source: nonGelatoArSource,
- note: `Open invoices from the AR dashboard ($ Money Owed) collecting by due date — overdue spread over the next 4 weeks. Matches the AR tab.`,
+ note: `Money owed collecting week-by-week. Existing open AR ($567k, every invoice) spread by EACH customer's own pay history (median days-to-pay), PLUS the ~${100 - +sameWeekPct}% of new sales that ages into AR. This IS your receivable coming in.`,
  values: nonGelatoArCollections,
  breakdown: pastArBreakdown,
  },
@@ -675,9 +726,9 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  breakdown: salesGrossBreakdown,
  },
  {
- label: 'New sales collections',
+ label: 'Collected from sales (this week)',
  source: projectedSalesSource,
- note: `Cash from NEW Little Tree sales (not yet invoiced), collected over time via the lag curve. Separate from the open-AR row above.`,
+ note: `Same-week cash: the ${sameWeekPct}% of this week's new Little Tree sales paid the same week invoiced. The other ${100 - +sameWeekPct}% ages into Little Tree Account Receivable (above) and collects later.`,
  values: projectedSalesWeekly,
  breakdown: sameWeekBreakdown,
  },
@@ -811,6 +862,26 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
      }
    : salesForecast;
 
+ // CFO reconciliation: Little Tree AR balance roll-forward (future only).
+ // Opening = today's open AR ($567k); each week adds new invoices (gross sales)
+ // and subtracts collections (AR row + same-week cash) → ending. Ending grows by
+ // the new sales not yet collected (lag tail past the window) - a real signal of
+ // sales outpacing collections, and a self-check that the rows tie out.
+ let arReconciliation: CashflowResult['arReconciliation'];
+ if (opts.direction !== 'past') {
+   const recon: NonNullable<CashflowResult['arReconciliation']> = [];
+   let bal = openArCollections13w;            // opening AR balance today ≈ $567k
+   for (let i = 0; i < WEEKS; i++) {
+     const opening = bal;
+     const newInv = salesGrossWeekly[i] ?? 0;
+     const collected = (nonGelatoArCollections[i] ?? 0) + (projectedSalesWeekly[i] ?? 0);
+     const ending = +(opening + newInv - collected).toFixed(2);
+     recon.push({ opening: +opening.toFixed(2), newInvoices: +newInv.toFixed(2), collected: +collected.toFixed(2), ending });
+     bal = ending;
+   }
+   arReconciliation = recon;
+ }
+
  return {
  asOf: new Date().toISOString(),
  anchor: ymd(ANCHOR),
@@ -839,6 +910,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  inventoryPerWeek: invWeekly,
  otherPerWeek: otherWeekly,
  },
+ arReconciliation,
  warnings,
  };
 }

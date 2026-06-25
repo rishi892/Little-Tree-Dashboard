@@ -37,9 +37,8 @@ export function MonthlyForecastEdit() {
  useEffect(() => {
  void load();
  const reload = () => void load();
- window.addEventListener('focus', reload);
- window.addEventListener('cashflow-edits-changed', reload);   // linked: weekly / 13-week saved
- return () => { window.removeEventListener('focus', reload); window.removeEventListener('cashflow-edits-changed', reload); };
+ window.addEventListener('cashflow-edits-changed', reload);   // linked: weekly / 13-week saved (no focus/poll)
+ return () => { window.removeEventListener('cashflow-edits-changed', reload); };
  // eslint-disable-next-line react-hooks/exhaustive-deps
  }, []);
 
@@ -96,9 +95,13 @@ export function MonthlyForecastEdit() {
  let totComp = 0, totEff = 0;
  const rows = months.map((mo) => {
  const compSum = mo.weeks.reduce((s, w) => s + w.computed, 0);
- const effSum = mo.weeks.reduce((s, w) => s + effOf(w.key, w.computed), 0);
  const baseSum = mo.weeks.reduce((s, w) => s + w.base, 0);
- const effSeas = baseSum > 0 ? effSum / baseSum : mo.origSeas;
+ // LIVE preview: while typing a new factor, recompute adjusted sales from it
+ // (base × your factor) so the Adjusted + Change columns update instantly.
+ const pending = mo.ym in buf ? parse(buf[mo.ym]) : null;
+ let effSum: number, effSeas: number;
+ if (pending != null) { effSeas = pending; effSum = baseSum * pending; }
+ else { effSum = mo.weeks.reduce((s, w) => s + effOf(w.key, w.computed), 0); effSeas = baseSum > 0 ? effSum / baseSum : mo.origSeas; }
  totComp += compSum; totEff += effSum;
  return { ym: mo.ym, compSum, effSum, effSeas, origSeas: mo.origSeas };
  });

@@ -164,6 +164,42 @@ export async function getArActualsForWeek(weekStart: string, weekEnd: string): P
  };
 }
 
+/**
+ * Collected DETAIL for any date range [start, end] (YYYY-MM-DD inclusive), by
+ * PAID date - the actual invoices behind the "collected" number. Powers (a) the
+ * variance drill-down (click a line → what was collected, from whom, how much)
+ * and (b) the calendar-period actual, so Month mode = the FULL month (Jun 1-25),
+ * matching the AR page - not just the complete Mon-Sun weeks. From LT Financials.
+ */
+export async function getCollectedDetail(start: string, end: string): Promise<{
+ start: string; end: string;
+ nonGelato: { total: number; count: number; invoices: InvoiceDetail[] };
+ gelato: { total: number; count: number; invoices: InvoiceDetail[] };
+}> {
+ const ltFin = await getLtFinancialsSales();
+ const ymd = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+ const ng: InvoiceDetail[] = [], gel: InvoiceDetail[] = [];
+ let ngT = 0, gT = 0;
+ for (const inv of ltFin.invoices) {
+  if (inv.paid <= 0 || !inv.paidDate) continue;
+  const pd = ymd(inv.paidDate);
+  if (pd < start || pd > end) continue;
+  const d: InvoiceDetail = {
+   invoiceNumber: inv.invoiceNumber, customer: inv.customer,
+   channel: inv.channel === 'Gelato' ? 'Gelato' : 'Little Tree',
+   invoiceDate: inv.invoiceDate ? ymd(inv.invoiceDate) : '', paidDate: pd, amount: inv.amount, paid: inv.paid,
+  };
+  if (inv.channel === 'Gelato') { gel.push(d); gT += inv.paid; }
+  else { ng.push(d); ngT += inv.paid; }
+ }
+ ng.sort((a, b) => b.paid - a.paid); gel.sort((a, b) => b.paid - a.paid);
+ return {
+  start, end,
+  nonGelato: { total: +ngT.toFixed(2), count: ng.length, invoices: ng },
+  gelato: { total: +gT.toFixed(2), count: gel.length, invoices: gel },
+ };
+}
+
 /** Historical share of non-Gelato dollars collected in the SAME (Monday-anchored)
  *  week the invoice was issued - i.e. "sale hua aur usi week paisa aa gaya". Used
  *  to split BUDGET new-sales collections into immediate (Projected AR) vs lagged
@@ -187,6 +223,45 @@ export async function getSameWeekCollectionRate(): Promise<number> {
   if (mondayKey(billDate) === mondayKey(inv.paidDate)) same += inv.paid;
  }
  return total > 0 ? same / total : 0;
+}
+
+let _lagCurveCache: { at: number; curve: number[] } | null = null;
+/**
+ * Empirical non-Gelato COLLECTION LAG CURVE from LT Financials paid history
+ * (last 12 months): the share of dollars collected in the SAME Monday-week the
+ * invoice was issued (index 0), +1 week (index 1), ... up to +12 weeks. Returns
+ * a 13-element array summing to ~1. This is the real "kab kitna paisa aata hai"
+ * shape - ~16% the first week, ~33% within two, then a long tail out past two
+ * months. The 13-week cashflow uses it to spread BOTH the open AR and new-sales
+ * collections realistically, instead of cramming everything into 4 weeks.
+ */
+export async function getCollectionLagCurve(): Promise<number[]> {
+ if (_lagCurveCache && Date.now() - _lagCurveCache.at < 10 * 60 * 1000) return _lagCurveCache.curve;
+ const N = 12;
+ const fallback = new Array(N + 1).fill(1 / (N + 1));
+ try {
+  const ltFin = await getLtFinancialsSales();
+  const mondayKey = (d: Date): string => {
+   const dow = d.getUTCDay(); const back = dow === 0 ? 6 : dow - 1;
+   const m = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - back));
+   return `${m.getUTCFullYear()}-${String(m.getUTCMonth() + 1).padStart(2, '0')}-${String(m.getUTCDate()).padStart(2, '0')}`;
+  };
+  const buckets = new Array(N + 1).fill(0); let tot = 0;
+  const cutoff = Date.now() - 365 * 86400000;
+  for (const inv of ltFin.invoices) {
+   if (inv.paid <= 0 || !inv.paidDate || inv.channel === 'Gelato') continue;
+   if (inv.paidDate.getTime() < cutoff) continue;
+   const bw = Date.parse(mondayKey(inv.invoiceDate)), pw = Date.parse(mondayKey(inv.paidDate));
+   let wk = Math.round((pw - bw) / (7 * 86400000));
+   wk = Math.max(0, Math.min(wk, N));
+   buckets[wk] += inv.paid; tot += inv.paid;
+  }
+  const curve = tot > 0 ? buckets.map((v) => v / tot) : fallback;
+  _lagCurveCache = { at: Date.now(), curve };
+  return curve;
+ } catch {
+  return fallback;
+ }
 }
 
 /** Simple direct check - the dashboard only cares about Gelato vs Non-Gelato,

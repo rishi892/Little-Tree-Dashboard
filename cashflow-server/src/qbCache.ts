@@ -33,10 +33,13 @@ const mem = new Map<string, Entry<unknown>>();
 const inflight = new Map<string, Promise<unknown>>();
 
 /** Drop the in-memory cache for a key (or all) so the next read re-fetches.
- *  The durable Supabase copy stays as the fallback. */
+ *  The durable Supabase copy stays as the fallback. Also drops fingerprinted
+ *  variants that start with `${key}:` (e.g. cashflow-13week:v6:future:<editsFp>). */
 export function dropDurableMem(key?: string): void {
-  if (key) mem.delete(key);
-  else mem.clear();
+  if (!key) { mem.clear(); return; }
+  mem.delete(key);
+  const pfx = key + ':';
+  for (const k of mem.keys()) if (k.startsWith(pfx)) mem.delete(k);
 }
 
 export type CacheResult<T> = { data: T; cached: boolean };

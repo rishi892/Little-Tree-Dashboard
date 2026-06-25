@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { fetchArOpenInvoices, type ArOpenResult, type ArOpenInvoice } from '../api';
+import { fetchArOpenInvoices, fetchArCollectionsHistory, type ArOpenResult, type ArOpenInvoice, type ArCollectionsHistory } from '../api';
 import { formatCurrency } from '../format';
 import { WeeklyRowEdit } from './WeeklyRowEdit';
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 type Seg = 'all' | 'littleTree' | 'infusedOrigin';
 const SEGS: Array<{ key: Seg; label: string }> = [
@@ -106,7 +108,7 @@ export function ArProjectionPage() {
  ))}
  </div>
 
- {/* Editable weekly AR (feeds the 13-Week grid) */}
+ {/* Editable weekly AR (feeds the 13-Week grid) — top */}
  <WeeklyRowEdit rowRx={/past ar/i} heading="Edit weekly AR collections" sub="What we expect to collect each week (all non-Gelato AR)" />
 
  {/* Aging buckets */}
@@ -131,11 +133,58 @@ export function ArProjectionPage() {
  </div>
  </div>
 
+ {/* AR collections trend — month × year (reference, at the bottom) */}
+ <ArCollectionsHistorySection />
+
  {modal && createPortal(
  <InvoiceModal title={modal.title} rows={modal.rows} onClose={() => setModal(null)} />,
  document.body,
  )}
  </>
+ );
+}
+
+/**
+ * AR collections trend — month × year grid + seasonality, from LT Financials paid
+ * history (non-Gelato, by paid date). The AR-side mirror of the Sales Projection
+ * page: "kitna AR har month/year wapas aata hai" — the trend the projection rests on.
+ */
+function ArCollectionsHistorySection() {
+ const [h, setH] = useState<ArCollectionsHistory | null>(null);
+ const [err, setErr] = useState<string | null>(null);
+ useEffect(() => { fetchArCollectionsHistory().then(setH).catch((e) => setErr(e instanceof Error ? e.message : 'Failed')); }, []);
+ const fmtK = (n: number) => (n > 0 ? formatCurrency(Math.round(n)) : '–');
+ if (err) return <div className="section"><div className="section-title">AR collections trend</div><div className="error" style={{ marginTop: 8 }}>{err}</div></div>;
+ if (!h) return <div className="section" style={{ padding: 18, color: 'var(--muted)' }}>Loading AR collections trend…</div>;
+
+ const years = h.years;
+ return (
+  <div className="section">
+   <div className="section-head"><div>
+    <div className="section-title">AR collections trend · month × year</div>
+    <div className="section-sub">How much AR actually collected each month/year (Little Tree non-Gelato, by paid date — from LT Financials). This is the real trend the AR projection rests on. Recent run-rate <strong>{fmtK(h.recentMonthlyAvg)}/mo ≈ {fmtK(h.recentWeeklyAvg)}/wk</strong>.</div>
+   </div></div>
+   <div className="table-wrap">
+    <table className="data-table" style={{ fontSize: 12 }}>
+     <thead><tr>
+      <th>Month</th>
+      {years.map((y) => <th key={y} className="num">{y}</th>)}
+     </tr></thead>
+     <tbody>
+      {MONTHS.map((mn, m) => (
+       <tr key={mn}>
+        <td><strong>{mn}</strong></td>
+        {years.map((y) => <td key={y} className="num" style={{ color: h.grid[m][y] ? 'var(--text)' : 'var(--muted)' }}>{fmtK(h.grid[m][y] ?? 0)}</td>)}
+       </tr>
+      ))}
+      <tr className="total-row">
+       <td><strong>YEAR TOTAL</strong></td>
+       {years.map((y) => <td key={y} className="num"><strong>{fmtK(h.yearTotals[y] ?? 0)}</strong></td>)}
+      </tr>
+     </tbody>
+    </table>
+   </div>
+  </div>
  );
 }
 
