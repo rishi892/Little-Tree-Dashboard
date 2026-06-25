@@ -423,6 +423,105 @@ app.post('/api/cashflow-overrides', async (req, res, next) => {
  } catch (err) { next(err); }
 });
 
+// Expense head overrides - per-head monthly amount typed in Expenses → Edit.
+// Display-only (does not feed the cashflow). Persisted in qb_cache.
+app.get('/api/expense-overrides', async (_req, res, next) => {
+ try {
+ const { loadExpenseOverrides } = await import('./expenseOverrides.js');
+ res.json(await loadExpenseOverrides());
+ } catch (err) { next(err); }
+});
+
+app.post('/api/expense-overrides', async (req, res, next) => {
+ try {
+ const { saveExpenseOverrides } = await import('./expenseOverrides.js');
+ const body = req.body ?? {};
+ const rawValues = (body.overrides ?? body) as Record<string, unknown>;
+ const clean: Record<string, number> = {};
+ for (const [k, v] of Object.entries(rawValues)) {
+ const n = Number(v);
+ if (k && k !== 'overrides' && k !== 'by' && Number.isFinite(n)) clean[k] = n;
+ }
+ const by = typeof body.by === 'string' ? body.by : 'Unknown';
+ res.json(await saveExpenseOverrides(clean, by));
+ } catch (err) { next(err); }
+});
+
+// Sales + AR forecast overrides - per-week amounts typed in Sales → Edit.
+// Display-only (does not feed the cashflow). Persisted in qb_cache.
+app.get('/api/forecast-overrides', async (_req, res, next) => {
+ try {
+ const { loadForecastOverrides } = await import('./forecastOverrides.js');
+ res.json(await loadForecastOverrides());
+ } catch (err) { next(err); }
+});
+
+app.post('/api/forecast-overrides', async (req, res, next) => {
+ try {
+ const { loadForecastOverrides, saveForecastOverrides } = await import('./forecastOverrides.js');
+ const body = (req.body ?? {}) as { sales?: Record<string, unknown>; ar?: Record<string, unknown> };
+ const toNums = (m: Record<string, unknown> | undefined): Record<string, number> => {
+ const o: Record<string, number> = {};
+ for (const [k, v] of Object.entries(m ?? {})) { const n = Number(v); if (k && Number.isFinite(n)) o[k] = n; }
+ return o;
+ };
+ await saveForecastOverrides({ sales: toNums(body.sales), ar: toNums(body.ar) });
+ res.json(await loadForecastOverrides());
+ } catch (err) { next(err); }
+});
+
+// AR open invoices - Little Tree's open AR computed EXACTLY like the AR
+// dashboard (Money Owed column + the dashboard's paid / write-off rules), so the
+// number matches the dashboard's Total Outstanding penny-for-penny.
+app.get('/api/ar-open-invoices', async (_req, res, next) => {
+ try {
+ const { getLittleTreeOpenAr } = await import('./arDashboardOpen.js');
+ res.json(await getLittleTreeOpenAr());
+ } catch (err) { next(err); }
+});
+
+// AR projection methodology - per-customer collection lag, expected pay-day,
+// collectibility haircut, lag curve, weekly placements. Powers the AR tab.
+app.get('/api/ar-projection', async (_req, res, next) => {
+ try {
+ const { getArProjection } = await import('./arProjection.js');
+ const now = new Date();
+ const t = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+ const dow = t.getUTCDay();
+ const monday = new Date(t.getTime() - (dow === 0 ? 6 : dow - 1) * 86400000);
+ const ymd = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+ const weeks = Array.from({ length: 13 }, (_, i) => {
+ const s = new Date(monday.getTime() + i * 7 * 86400000);
+ const e = new Date(s.getTime() + 6 * 86400000);
+ return { index: i, start: ymd(s), end: ymd(e), label: `${s.getUTCMonth() + 1}/${s.getUTCDate()}` };
+ });
+ const ar = await getArProjection(weeks.map((w) => ({ start: w.start, end: w.end })));
+ res.json({ weeks, ...ar });
+ } catch (err) { next(err); }
+});
+
+// Unified cashflow cell edits (inflow Sales/AR + outflow expenses), persisted
+// to Supabase with attribution (who edited, when). Replaces the localStorage
+// what-if store.
+app.get('/api/cashflow-edits', async (_req, res, next) => {
+ try {
+ const { loadCashflowEdits } = await import('./cashflowEdits.js');
+ res.json(await loadCashflowEdits());
+ } catch (err) { next(err); }
+});
+
+app.post('/api/cashflow-edits', async (req, res, next) => {
+ try {
+ const { applyCashflowEdits } = await import('./cashflowEdits.js');
+ const body = (req.body ?? {}) as { set?: Record<string, unknown>; clear?: unknown[]; by?: unknown };
+ const set: Record<string, number> = {};
+ for (const [k, v] of Object.entries(body.set ?? {})) { const n = Number(v); if (k && Number.isFinite(n)) set[k] = n; }
+ const clear = Array.isArray(body.clear) ? body.clear.filter((k): k is string => typeof k === 'string') : [];
+ const by = typeof body.by === 'string' ? body.by : 'Unknown';
+ res.json(await applyCashflowEdits(set, clear, by));
+ } catch (err) { next(err); }
+});
+
 // Weekly snapshots + actuals - powers the Past Weeks variance view.
 // Each snapshot stores what we forecasted on a given Monday for the next 13
 // weeks. Actuals are computed live from Tiller transactions so they reflect
@@ -655,11 +754,21 @@ app.get('/api/sales-week-invoices', async (req, res, next) => {
   const end = new Date(start.getTime() + 7 * 86400000);   // Mon..Sun
   const { getLtFinancialsSales } = await import('./ltFinancialsSales.js');
   const EXCLUDED = /(?:little tree[- ]+)?(gelato|alien\s+(?:brainz|brains|arainz)\b|funk'?d?\s*up\b|(?:yacht|tacht)\s+fuel)/i;
+  const GELATO = /(?:little tree[- ]+)?gelato/i;
+  const PRIVATE_LABEL = /(alien\s+(?:brainz|brains|arainz)\b|funk'?d?\s*up\b|(?:yacht|tacht)\s+fuel)/i;
+  // Filter the drill-down to the SELECTED bucket so it matches the table above
+  // (previously hardcoded to wholesale, so Gelato/Private Label showed Little
+  // Tree wholesale invoices). Default = wholesale (everything not Gelato/PL).
+  const bucket = String(req.query.bucket || 'wholesale');
+  const matchBucket = (c: string) =>
+   bucket === 'gelato' ? GELATO.test(c)
+   : bucket === 'privateLabel' ? PRIVATE_LABEL.test(c)
+   : !EXCLUDED.test(c);
   const r = await getLtFinancialsSales();
   const matches = r.invoices
    .filter((inv) => inv.amount > 0
      && inv.invoiceDate >= start && inv.invoiceDate < end
-     && !EXCLUDED.test(inv.customer))
+     && matchBucket(inv.customer))
    .map((inv) => ({
     invoiceNumber: inv.invoiceNumber,
     date: inv.date,

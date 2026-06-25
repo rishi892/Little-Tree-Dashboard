@@ -32,11 +32,14 @@ export function SalesForecastPage() {
  async function toggleWeek(weekStart: string) {
   if (expandedWeek === weekStart) { setExpandedWeek(null); return; }
   setExpandedWeek(weekStart);
-  if (!weekInvoices[weekStart]) {
+  // Cache per bucket so switching Little Tree / Private Label / Gelato re-fetches
+  // the right invoices instead of reusing the first bucket's drill-down.
+  const cacheKey = `${selectedBucket}:${weekStart}`;
+  if (!weekInvoices[cacheKey]) {
    setWeekLoading(weekStart);
    try {
-    const r = await fetchSalesWeekInvoices(weekStart);
-    setWeekInvoices((p) => ({ ...p, [weekStart]: r }));
+    const r = await fetchSalesWeekInvoices(weekStart, selectedBucket);
+    setWeekInvoices((p) => ({ ...p, [cacheKey]: r }));
    } catch {
     /* swallow - UI shows pending state */
    } finally {
@@ -300,7 +303,7 @@ export function SalesForecastPage() {
     <tbody>
     {weeklyAnalysis.history.slice(-13).map((h) => {
      const isExpanded = expandedWeek === h.weekStart;
-     const inv = weekInvoices[h.weekStart];
+     const inv = weekInvoices[`${selectedBucket}:${h.weekStart}`];
      return (
       <>
       <tr key={`h-${h.weekStart}`} style={{ cursor: h.invoiceCount > 0 ? 'pointer' : 'default' }} onClick={() => h.invoiceCount > 0 && toggleWeek(h.weekStart)}>

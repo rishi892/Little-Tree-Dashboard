@@ -403,7 +403,7 @@ export async function getArAging(): Promise<ArAgingResult> {
  try {
  const tracker = await getInvoiceTracker();
  for (const inv of tracker.invoices) {
- const open = +(inv.amount - inv.paid).toFixed(2);
+ const open = inv.openBalance;   // = "Money Owed" (AR dashboard source of truth)
  if (open <= 0.01) continue;
  if (open < 200) continue; // skip sub-$200 noise (per user)
  if (/write\s*off/i.test(inv.status)) continue;

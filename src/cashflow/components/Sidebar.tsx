@@ -6,7 +6,7 @@ import type { ViewKey } from '../CashflowApp';
 const ITEMS: Array<{ key: ViewKey; label: string }> = [
   { key: 'cashflow', label: 'Cash Flow' },
   { key: 'expenses', label: 'Expenses' },
-  { key: 'sales', label: 'Sales' },
+  { key: 'sales', label: 'Projections' },
   { key: 'reports', label: 'Reports' },
   { key: 'upflow', label: 'Upflow' },
 ];

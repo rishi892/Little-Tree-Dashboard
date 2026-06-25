@@ -363,7 +363,7 @@ export async function getArProjection(weeks: Week[], asOf?: Date): Promise<ArPro
  }
 
  for (const inv of tracker.invoices) {
- const open = +(inv.amount - inv.paid).toFixed(2);
+ const open = inv.openBalance;   // = "Money Owed" (AR dashboard source of truth)
  if (open <= 0.01) continue;
  if (/write\s*off/i.test(inv.status)) continue;
  const channel = channelOf(inv.customer);

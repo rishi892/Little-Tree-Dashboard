@@ -1,22 +1,27 @@
 import { useEffect, useState } from 'react';
 import { onCfoNav } from '../cfoNav';
 import { SalesForecastPage } from './SalesForecastPage';
+import { ArProjectionPage } from './ArProjectionPage';
+import { WeeklyRowEdit } from './WeeklyRowEdit';
+import { MonthlyForecastEdit } from './MonthlyForecastEdit';
 
-// Focused "Sales" section. Starts with the Sales Projection sub-tab; more
-// sales sub-tabs (Sales by Channel, Sales by Reps, Sales Status) can be added
-// here later without touching the sidebar.
-type Tab = 'forecast';
+// "Projections" section: Sales (forecast + editable weekly sales) and AR (how AR
+// collections are derived + editable weekly AR). Each thing lives in its own
+// tab and is edited in place.
+type Tab = 'sales' | 'ar';
 
 const TABS: Array<{ key: Tab; label: string }> = [
-  { key: 'forecast', label: 'Sales Projection' },
+  { key: 'sales', label: 'Sales' },
+  { key: 'ar', label: 'AR' },
 ];
 
 export function SalesHub() {
-  const [tab, setTab] = useState<Tab>('forecast');
+  const [tab, setTab] = useState<Tab>('sales');
 
-  // CFO Copilot "show me" - switch to the sub-tab it points at.
+  // CFO Copilot "show me" - jump to the tab it points at (accept legacy keys).
   useEffect(() => onCfoNav((d) => {
-    if (d.tab === 'forecast') setTab('forecast');
+    if (d.tab === 'sales' || d.tab === 'forecast' || d.tab === 'edit') setTab('sales');
+    else if (d.tab === 'ar') setTab('ar');
   }), []);
 
   return (
@@ -33,7 +38,18 @@ export function SalesHub() {
         ))}
       </div>
 
-      <div style={{ display: tab === 'forecast' ? 'block' : 'none' }}>{tab === 'forecast' && <SalesForecastPage />}</div>
+      <div style={{ display: tab === 'sales' ? 'block' : 'none' }}>
+        {tab === 'sales' && (
+          <>
+            <SalesForecastPage />
+            <MonthlyForecastEdit />
+            <WeeklyRowEdit rowRx={/^sales \(this week/i} heading="Edit weekly sales" sub="Gross sales that feed the 13-Week cashflow" />
+          </>
+        )}
+      </div>
+      <div style={{ display: tab === 'ar' ? 'block' : 'none' }}>
+        {tab === 'ar' && <ArProjectionPage />}
+      </div>
     </>
   );
 }

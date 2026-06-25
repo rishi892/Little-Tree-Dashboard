@@ -3,10 +3,11 @@ import { createPortal } from 'react-dom';
 import {
  fetchCashflow13, fetchCashflowOverrides, saveCashflowOverrides,
  fetchCurrentMonthOverview, fetchPastWeeksGrid,
+ fetchCashflowEdits, saveCashflowEdits, currentUserName,
  type Cashflow13, type CashflowSource, type CashflowStatus, type CashflowOverrides,
  type CashflowLine, type CurrentMonthOverview, type PastWeeksGridResponse,
  type PastWeeksGridItem, type WeekActuals,
- type WeekExpenseLines, type ExpectedInflowWeek,
+ type WeekExpenseLines, type ExpectedInflowWeek, type CashflowEdits,
 } from '../api';
 import { CollapsibleSection } from './CollapsibleSection';
 import InfoTip from '../../ar/dashboard/components/InfoTip.jsx';
@@ -14,25 +15,41 @@ import { formatCurrency, formatSigned } from '../format';
 
 // Plain-language "how is this number computed" explainers, shown as a round ⓘ
 // next to each inflow / outflow row (matches the AR dashboard's info buttons).
+// Clean display names for the inflow rows. The server keeps its internal
+// labels (used for snapshot / past-week matching + the ROW_INFO tooltip
+// lookup); we only relabel what the user sees in the table.
+const DISPLAY_LABELS: Record<string, string> = {
+  'Gelato AR Collections (Net 97)': 'Gelato Receivable',
+  'Past AR Collections (lag-curve)': 'Little Tree Account Receivable',
+  'Sales (this week, forecast)': 'Little Tree Sales',
+  'Collected from sales (this week)': 'Weekly Cash Collection',
+};
+
 const ROW_INFO: Record<string, { title: string; purpose: string; detail: string; source: string }> = {
  // --- Inflows ---
  'Gelato AR Collections (Net 97)': {
- title: 'Gelato AR Collections (Net 97)',
+ title: 'Gelato Receivable',
  purpose: 'Gelato batch money we expect to collect, week by week.',
- detail: 'Each PENDING Gelato batch invoice (from the Gelato Sales / Batches sheet) is placed in the week it should be collected = invoice issue date + 97 days (Net 90 + a 7-day payment buffer). Any batch already past due lands in Week 1. Adding up those placements per week gives this row.',
+ detail: 'Each pending Gelato batch invoice is placed in the week it should collect = issue date + 97 days (Net 90 + a 7-day buffer). Past-due batches land in Week 1.',
  source: 'Gelato Sales / Batches sheet (pending batch invoices).',
  },
- 'Little Tree AR Collections (lag-curve)': {
- title: 'Little Tree AR Collections (lag-curve)',
+ 'Past AR Collections (lag-curve)': {
+ title: 'Little Tree Account Receivable',
  purpose: 'Expected weekly collections from open Little Tree (non-Gelato) invoices.',
- detail: 'Every open non-Gelato invoice in the Invoice Tracker is spread across the 13 weeks using that customer’s own historical pay-day pattern (median days-to-pay ± spread, learned from their past paid invoices). Overdue invoices are pulled into Week 1; not-yet-due ones land in their expected week. The per-week totals make up this row.',
+ detail: 'Every open non-Gelato invoice is spread across the weeks using that customer’s own historical pay-day pattern (median days-to-pay ± spread). Overdue invoices land in Week 1. Also includes the lagged share of new sales that don’t collect the same week.',
  source: 'Invoice Tracker (open invoices) + each customer’s paid-history timing.',
  },
- 'Projected AR from new sales (3-bucket)': {
- title: 'Projected AR from new sales (3-bucket)',
- purpose: 'Cash from NEW sales not yet invoiced (separate from the open invoices above).',
- detail: 'A forward sales forecast across three buckets - Little Tree, Private Label and Gelato - each projected from the recent sales run-rate, then spread into weeks by that bucket’s typical collection lag. These are brand-new invoices that don’t exist yet, so there’s no double-count with the AR collection rows. The Worst / Base / Best buttons flex this row ±18%.',
- source: 'Sales forecast (recent per-bucket run-rate + collection lag).',
+ 'Sales (this week, forecast)': {
+ title: 'Little Tree Sales',
+ purpose: 'Gross Little Tree (wholesale) sales we expect to invoice each week.',
+ detail: 'A forward wholesale sales forecast (recent run-rate × month-of-year seasonality), spread into weeks by the real week-of-month invoicing pattern. Reference only — NOT added to cash; the cash shows as Weekly Cash Collection (same week) + Little Tree Account Receivable (the rest, later).',
+ source: 'Sales forecast (recent wholesale run-rate + seasonality).',
+ },
+ 'Collected from sales (this week)': {
+ title: 'Weekly Cash Collection',
+ purpose: 'Same-week cash from this week’s new sales.',
+ detail: 'The share of each week’s gross sales that gets paid the same week it’s invoiced (from 2024+ paid history). The rest collects later and shows in Little Tree Account Receivable.',
+ source: 'Sales forecast × same-week collection rate (LT Financials paid history).',
  },
  // --- Outflows ---
  'Inventory & Raw Materials': {
@@ -95,14 +112,13 @@ export function CashFlow13Week() {
  const [overrides, setOverrides] = useState<CashflowOverrides | null>(null);
  const [savingOverrides, setSavingOverrides] = useState(false);
  const [editsBuffer, setEditsBuffer] = useState<Record<string, string>>({});
- // Per-cell what-if overrides - key = `${label}|${weekIdx}`, value = $ amount.
- // Persisted to localStorage so the CFO's edits survive page reloads until
- // they hit "Reset". These layer on top of the live data without changing
- // backend state, so a refresh of the underlying QB numbers won't blow them
- // away. Phase 2: lift this to backend so the whole team sees the scenario.
- const [cellOverrides, setCellOverrides] = useState<Record<string, number>>({});
+ // Per-cell manual edits (inflow Sales/AR + outflow expenses), persisted to
+ // Supabase WITH attribution (who edited, when). Keyed by `${label}|${weekStart}`
+ // so an edit sticks to its week. Shared with the Sales → Edit tab and visible
+ // to the whole team. Replaces the old localStorage what-if store.
+ const [cashflowEdits, setCashflowEdits] = useState<CashflowEdits>({});
  const [editingCell, setEditingCell] = useState<
-   { label: string; weekIdx: number; current: number } | null
+   { label: string; weekIdx: number; current: number; kind?: 'inflow' } | null
  >(null);
  const [salesScenario, setSalesScenario] = useState<'worst' | 'base' | 'best'>('base');
  // Row whose breakdown modal ("what's included") is open.
@@ -127,27 +143,18 @@ export function CashFlow13Week() {
  }
  }
 
- // Hydrate cell-overrides from localStorage once on mount.
+ // Load the shared cashflow cell edits (server) + refresh on focus and on a
+ // light poll, so edits made here or in the Sales → Edit tab show everywhere.
  useEffect(() => {
-   try {
-     const raw = window.localStorage.getItem('cf13-cell-overrides');
-     if (raw) {
-       const parsed = JSON.parse(raw);
-       if (parsed && typeof parsed === 'object') setCellOverrides(parsed);
-     }
-   } catch { /* ignore corrupt storage */ }
+   const loadEdits = () => fetchCashflowEdits()
+     .then((e) => setCashflowEdits(e ?? {}))
+     .catch(() => { /* keep prior */ });
+   loadEdits();
+   const poll = window.setInterval(loadEdits, 15_000);
+   window.addEventListener('focus', loadEdits);
+   window.addEventListener('cashflow-edits-changed', loadEdits);   // linked: edit elsewhere
+   return () => { window.clearInterval(poll); window.removeEventListener('focus', loadEdits); window.removeEventListener('cashflow-edits-changed', loadEdits); };
  }, []);
-
- // Persist overrides whenever they change.
- useEffect(() => {
-   try {
-     if (Object.keys(cellOverrides).length === 0) {
-       window.localStorage.removeItem('cf13-cell-overrides');
-     } else {
-       window.localStorage.setItem('cf13-cell-overrides', JSON.stringify(cellOverrides));
-     }
-   } catch { /* storage full / blocked - skip silently */ }
- }, [cellOverrides]);
 
  useEffect(() => {
  load(false, false, direction);
@@ -236,15 +243,50 @@ export function CashFlow13Week() {
 
  const { weeks, inflows, outflows, totals, openingCashWk1, openingCashSource, assumptions, warnings } = data;
 
- // ── What-if cell overrides - derived helpers ──────────────────────────
- const overrideKey = (label: string, weekIdx: number) => `${label}|${weekIdx}`;
- const effectiveOutflow = (label: string, baseVal: number, weekIdx: number): number => {
-   const ov = cellOverrides[overrideKey(label, weekIdx)];
-   return typeof ov === 'number' ? ov : baseVal;
+ // ── Cell edits (server-persisted in Supabase, attributed) - helpers ───────
+ // ONE store for inflow Sales/AR + outflow expense edits. Key = label|weekStart
+ // so an edit sticks to its week. Every edit records who made it + when, and is
+ // shared with the whole team and the Sales → Edit tab.
+ const editKey = (label: string, weekIdx: number) => `${label}|${weeks[weekIdx]?.start ?? weekIdx}`;
+ const editEntry = (label: string, weekIdx: number): CashflowEdits[string] | undefined => cashflowEdits[editKey(label, weekIdx)];
+ const editVal = (label: string, weekIdx: number): number | undefined => editEntry(label, weekIdx)?.value;
+ const overrideKey = editKey;
+ const effectiveOutflow = (label: string, baseVal: number, weekIdx: number): number => editVal(label, weekIdx) ?? baseVal;
+ const effectiveInflow = effectiveOutflow;
+ const hasOverride = (label: string, weekIdx: number) => editVal(label, weekIdx) != null;
+ const forecastOvVal = editVal;
+ const isInflowEditable = (_label: string) => true;   // every row is editable + saved now
+ const hasAnyOverride = Object.keys(cashflowEdits).length > 0;
+ // "edited by X · date" attribution string for a cell, if edited.
+ const editByNote = (label: string, weekIdx: number): string | undefined => {
+   const e = editEntry(label, weekIdx);
+   if (!e) return undefined;
+   const when = (() => { try { return new Date(e.at).toLocaleDateString(); } catch { return ''; } })();
+   return `edited by ${e.by}${when ? ` · ${when}` : ''}`;
  };
- const hasOverride = (label: string, weekIdx: number) =>
-   typeof cellOverrides[overrideKey(label, weekIdx)] === 'number';
- const hasAnyOverride = Object.keys(cellOverrides).length > 0;
+ const applyEdit = (label: string, weekIdx: number, value: number, applyForward: boolean) => {
+   const set: Record<string, number> = {};
+   if (applyForward) { for (let i = weekIdx; i < weeks.length; i++) set[editKey(label, i)] = value; }
+   else set[editKey(label, weekIdx)] = value;
+   const at = new Date().toISOString();
+   const me = currentUserName();
+   setCashflowEdits((prev) => { const next = { ...prev }; for (const k of Object.keys(set)) next[k] = { value: set[k], by: me, at }; return next; });
+   void saveCashflowEdits(set).then(setCashflowEdits).catch(() => { /* keep optimistic */ });
+ };
+ const clearEdit = (label: string, weekIdx: number) => {
+   const key = editKey(label, weekIdx);
+   setCashflowEdits((prev) => { const next = { ...prev }; delete next[key]; return next; });
+   void saveCashflowEdits({}, [key]).then(setCashflowEdits).catch(() => { /* keep optimistic */ });
+ };
+ const clearEditRow = (label: string) => {
+   const keys = weeks.map((_, i) => editKey(label, i));
+   setCashflowEdits((prev) => { const next = { ...prev }; for (const k of keys) delete next[k]; return next; });
+   void saveCashflowEdits({}, keys).then(setCashflowEdits).catch(() => { /* keep optimistic */ });
+ };
+ // Back-compat aliases - the render + modal call these names.
+ const applyForecastOv = applyEdit;
+ const clearForecastOv = clearEdit;
+ const clearForecastOvRow = clearEditRow;
 
  // Recompute inflow + outflow totals + net change + closing cash with the
  // active SCENARIO (sales best/base/worst) and any what-if cell overrides
@@ -254,15 +296,18 @@ export function CashFlow13Week() {
  // consistently. Previously the sales scenario only re-coloured the TOTAL
  // INFLOWS display row while closing cash, status and KPIs stayed on the base
  // case - so "Worst case" gave false comfort. Now it flows all the way through.
- const sfScenario = data.salesForecast;
- const projSalesIdx = inflows.findIndex((l) => /^projected sales/i.test(l.label));
+ // Inflow total = backend truth + any what-if cell-override deltas on the
+ // (non-display-only) inflow rows, so editing a sales / AR cell flows through
+ // to TOTAL INFLOWS / NET / CLOSING / STATUS and the KPI cards.
  const adjustedInflowTotals = weeks.map((_, i) => {
-   if (sfScenario && projSalesIdx >= 0 && salesScenario !== 'base') {
-     const baseRow = inflows[projSalesIdx].values[i] ?? 0;
-     const scenarioRow = (salesScenario === 'best' ? sfScenario.weeklyInflowBest[i] : sfScenario.weeklyInflowWorst[i]) ?? 0;
-     return (totals.inflows[i] ?? 0) - baseRow + scenarioRow;
+   let t = totals.inflows[i] ?? 0;
+   for (const line of inflows) {
+     if (line.displayOnly) continue;            // reference rows aren't in cash
+     const base = line.values[i] ?? 0;
+     const eff = effectiveInflow(line.label, base, i);  // cell-override OR shared forecast-override
+     if (eff !== base) t += eff - base;
    }
-   return totals.inflows[i] ?? 0;
+   return t;
  });
  const adjustedOutflowTotals = weeks.map((_, i) =>
    outflows.reduce((sum, line) => sum + effectiveOutflow(line.label, line.values[i] ?? 0, i), 0)
@@ -292,33 +337,15 @@ export function CashFlow13Week() {
  const sum13InOut = adjustedInflowTotal13w - adjustedOutflowTotals.reduce((s, v) => s + v, 0);
  const criticalWeeks = adjustedStatus.filter((s) => s === 'CRITICAL').length;
 
- // ── Cell override handlers ────────────────────────────────────────────
- const applyOverride = (label: string, weekIdx: number, value: number, applyForward: boolean) => {
-   setCellOverrides((prev) => {
-     const next = { ...prev };
-     if (applyForward) {
-       for (let i = weekIdx; i < weeks.length; i++) next[overrideKey(label, i)] = value;
-     } else {
-       next[overrideKey(label, weekIdx)] = value;
-     }
-     return next;
-   });
+ // ── Cell override handlers (all route to the shared server store) ─────────
+ const applyOverride = applyEdit;
+ const clearOverride = clearEdit;
+ const clearRowOverrides = clearEditRow;
+ const clearAllOverrides = () => {
+   const keys = Object.keys(cashflowEdits);
+   setCashflowEdits({});
+   void saveCashflowEdits({}, keys).then(setCashflowEdits).catch(() => { /* keep optimistic */ });
  };
- const clearOverride = (label: string, weekIdx: number) => {
-   setCellOverrides((prev) => {
-     const next = { ...prev };
-     delete next[overrideKey(label, weekIdx)];
-     return next;
-   });
- };
- const clearRowOverrides = (label: string) => {
-   setCellOverrides((prev) => {
-     const next: Record<string, number> = {};
-     for (const k of Object.keys(prev)) if (!k.startsWith(`${label}|`)) next[k] = prev[k];
-     return next;
-   });
- };
- const clearAllOverrides = () => setCellOverrides({});
 
  return (
  <>
@@ -394,7 +421,7 @@ export function CashFlow13Week() {
      gap: 12,
    }}>
      <div style={{ fontSize: 13, color: '#854d0e' }}>
-       <strong>⚡ What-if scenario active</strong> · {Object.keys(cellOverrides).length} cell{Object.keys(cellOverrides).length === 1 ? '' : 's'} overridden.
+       <strong>⚡ Manual edits active</strong> · {Object.keys(cashflowEdits).length} cell{Object.keys(cashflowEdits).length === 1 ? '' : 's'} edited (saved).
        Closing cash and status pills below reflect your edits, not the live forecast.
      </div>
      <button
@@ -525,6 +552,8 @@ export function CashFlow13Week() {
  {inflows.map((line, idx) => {
  const isProjectedSales = /^projected sales/i.test(line.label);
  const isDisplayOnly = !!line.displayOnly;
+ const editableInflow = isInflowEditable(line.label);
+ const rowHasOverride = line.values.some((_, i) => hasOverride(line.label, i) || forecastOvVal(line.label, i) != null);
  const sf = data.salesForecast;
  // Scenario swap: if this is the Projected Sales row and a non-base
  // scenario is selected, replace the row's weekly values with the
@@ -532,7 +561,7 @@ export function CashFlow13Week() {
  const rowValues = (isProjectedSales && sf && salesScenario !== 'base')
    ? (salesScenario === 'best' ? sf.weeklyInflowBest : sf.weeklyInflowWorst)
    : line.values;
- const rowTotal = rowValues.reduce((s, v) => s + v, 0);
+ const rowTotal = rowValues.reduce((s, v, i) => s + effectiveInflow(line.label, v ?? 0, i), 0);
  const scenarioPct = salesScenario === 'best' ? '+18%' : salesScenario === 'worst' ? '-18%' : null;
  return (
  <tr key={`in-${idx}`} style={isDisplayOnly ? { opacity: 0.7, fontStyle: 'italic' } : undefined}>
@@ -540,15 +569,19 @@ export function CashFlow13Week() {
  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
  {line.breakdown && line.breakdown.length > 0 ? (
    <button type="button" onClick={() => setBreakdownLine(line)} title="See what's included"
-     style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'var(--accent-hover, #047857)', cursor: 'pointer', textDecoration: 'underline dotted', textUnderlineOffset: 3 }}>
-     {line.label}
+     className="cf-rowlabel">
+     {DISPLAY_LABELS[line.label] || line.label}
    </button>
- ) : <span>{line.label}</span>}
+ ) : <strong>{DISPLAY_LABELS[line.label] || line.label}</strong>}
  {ROW_INFO[line.label] && (
    <InfoTip
      {...ROW_INFO[line.label]}
      style={{ position: 'static', top: 'auto', right: 'auto', display: 'inline-flex' }}
    />
+ )}
+ {rowHasOverride && (
+   <button type="button" title="Reset overrides on this row" onClick={() => { if (editableInflow) clearForecastOvRow(line.label); else clearRowOverrides(line.label); }}
+     style={{ background: 'none', border: 'none', color: 'var(--warn)', cursor: 'pointer', padding: 0, font: 'inherit', fontSize: 11 }}>↺ reset row</button>
  )}
  {isDisplayOnly && (
    <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 4, padding: '1px 6px', fontStyle: 'normal', letterSpacing: 0.3 }}>
@@ -579,12 +612,25 @@ export function CashFlow13Week() {
    </div>
  )}
  </div>
- {line.note && <div className="vendor-note">{isProjectedSales && scenarioPct ? `Scenario: ${salesScenario} (${scenarioPct}) · ` : ''}{line.note}</div>}
+ {line.note && <div className="vendor-note" style={{ color: '#374151' }}>{isProjectedSales && scenarioPct ? `Scenario: ${salesScenario} (${scenarioPct}) · ` : ''}{line.note}</div>}
  </td>
  <td><span className={`pill-tag tag-${srcTone(line.source)}`}>{srcLabel(line.source)}</span></td>
- {rowValues.map((v, i) => (
- <td key={i} className="num">{v ? formatCurrency(v) : '-'}</td>
- ))}
+ {rowValues.map((v, i) => {
+   const effVal = effectiveInflow(line.label, v ?? 0, i);
+   const isOver = hasOverride(line.label, i) || forecastOvVal(line.label, i) != null;
+   return (
+     <td
+       key={i}
+       className="num cf-edit-cell"
+       style={{ cursor: 'pointer', background: isOver ? '#fef9c3' : undefined, position: 'relative' }}
+       onClick={() => setEditingCell({ label: line.label, weekIdx: i, current: effVal, kind: editableInflow ? 'inflow' : undefined })}
+       title={isOver ? `${editByNote(line.label, i) ?? 'Edited'} · was ${formatCurrency(v ?? 0)}` : 'Click to edit · saved with your name'}
+     >
+       {effVal ? formatCurrency(effVal) : '-'}
+       {isOver && <span style={{ marginLeft: 4, color: '#a16207', fontSize: 10 }}>⚡</span>}
+     </td>
+   );
+ })}
  <td className="num"><strong>{formatCurrency(rowTotal)}</strong></td>
  </tr>
  );
@@ -614,10 +660,10 @@ export function CashFlow13Week() {
  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
    {line.breakdown && line.breakdown.length > 0 ? (
      <button type="button" onClick={() => setBreakdownLine(line)} title="See what's included"
-       style={{ background: 'none', border: 'none', padding: 0, font: 'inherit', color: 'var(--accent-hover, #047857)', cursor: 'pointer', textDecoration: 'underline dotted', textUnderlineOffset: 3 }}>
-       {line.label}
+       className="cf-rowlabel">
+       {DISPLAY_LABELS[line.label] || line.label}
      </button>
-   ) : <span>{line.label}</span>}
+   ) : <strong>{DISPLAY_LABELS[line.label] || line.label}</strong>}
    {ROW_INFO[line.label] && (
      <InfoTip
        {...ROW_INFO[line.label]}
@@ -633,7 +679,7 @@ export function CashFlow13Week() {
      >↺ reset row</button>
    )}
  </div>
- {line.note && <div className="vendor-note">{line.note}</div>}
+ {line.note && <div className="vendor-note" style={{ color: '#374151' }}>{line.note}</div>}
  </td>
  <td><span className={`pill-tag tag-${srcTone(line.source)}`}>{srcLabel(line.source)}</span></td>
  {line.values.map((v, i) => {
@@ -649,7 +695,7 @@ export function CashFlow13Week() {
          position: 'relative',
        }}
        onClick={() => setEditingCell({ label: line.label, weekIdx: i, current: effVal })}
-       title={isOver ? `Overridden - was ${formatCurrency(v ?? 0)}` : 'Click to edit (what-if)'}
+       title={isOver ? `${editByNote(line.label, i) ?? 'Edited'} · was ${formatCurrency(v ?? 0)}` : 'Click to edit · saved with your name'}
      >
        {effVal ? formatCurrency(effVal) : '-'}
        {isOver && <span style={{ marginLeft: 4, color: '#a16207', fontSize: 10 }}>⚡</span>}
@@ -737,18 +783,19 @@ export function CashFlow13Week() {
 
  {editingCell && (
    <EditOutflowModal
-     label={editingCell.label}
+     label={DISPLAY_LABELS[editingCell.label] || editingCell.label}
      weekIdx={editingCell.weekIdx}
      weekLabel={`Wk ${editingCell.weekIdx + 1} · ${weeks[editingCell.weekIdx]?.label ?? ''}`}
-     liveValue={outflows.find((l) => l.label === editingCell.label)?.values[editingCell.weekIdx] ?? 0}
+     liveValue={[...inflows, ...outflows].find((l) => l.label === editingCell.label)?.values[editingCell.weekIdx] ?? 0}
      currentValue={editingCell.current}
      isOverridden={hasOverride(editingCell.label, editingCell.weekIdx)}
+     savedNote={editByNote(editingCell.label, editingCell.weekIdx) ?? 'Saved to the server with your name — shared with the team.'}
      onSave={(value, applyForward) => {
-       applyOverride(editingCell.label, editingCell.weekIdx, value, applyForward);
+       applyEdit(editingCell.label, editingCell.weekIdx, value, applyForward);
        setEditingCell(null);
      }}
      onClear={() => {
-       clearOverride(editingCell.label, editingCell.weekIdx);
+       clearEdit(editingCell.label, editingCell.weekIdx);
        setEditingCell(null);
      }}
      onCancel={() => setEditingCell(null)}
@@ -760,7 +807,7 @@ export function CashFlow13Week() {
 
 // ---- Edit Outflow Modal ---------------------------------------------------
 function EditOutflowModal({
- label, weekIdx, weekLabel, liveValue, currentValue, isOverridden,
+ label, weekIdx, weekLabel, liveValue, currentValue, isOverridden, savedNote,
  onSave, onClear, onCancel,
 }: {
  label: string;
@@ -769,6 +816,7 @@ function EditOutflowModal({
  liveValue: number;
  currentValue: number;
  isOverridden: boolean;
+ savedNote?: string;
  onSave: (value: number, applyForward: boolean) => void;
  onClear: () => void;
  onCancel: () => void;
@@ -829,9 +877,10 @@ function EditOutflowModal({
        }}
      >
        <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--muted)' }}>
-         What-if edit · {weekLabel}
+         {savedNote ? 'Edit' : 'What-if edit'} · {weekLabel}
        </div>
-       <h3 style={{ margin: '4px 0 18px', fontSize: 18, fontWeight: 600 }}>{label}</h3>
+       <h3 style={{ margin: '4px 0 6px', fontSize: 18, fontWeight: 600 }}>{label}</h3>
+       {savedNote && <div style={{ margin: '0 0 14px', fontSize: 12, color: '#059669' }}>{savedNote}</div>}
 
        {/* Live snapshot showing BOTH weekly and monthly equivalent of
            the current value, so the user sees the relationship before

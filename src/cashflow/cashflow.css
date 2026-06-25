@@ -845,3 +845,15 @@ code {
 /* Same table polish inside the drill modal */
 .cm-modal-body .data-table thead th { background: #f8fafc; }
 .cm-modal-body .data-table tbody tr:hover:not(.total-row) { background: var(--accent-soft-2, #f0fdf4); }
+
+/* 13-week row labels: clean bold like OPENING CASH; clickability shown on hover */
+.cf-rowlabel {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: inherit;
+  cursor: pointer;
+}
+.cf-rowlabel:hover { text-decoration: underline; text-underline-offset: 3px; }

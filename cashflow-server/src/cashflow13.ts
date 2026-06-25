@@ -374,6 +374,21 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  warnings.push(`AR projection failed (${e instanceof Error ? e.message : '?'}) - non-Gelato AR = 0.`);
  }
 
+ // FUTURE view: derive the open-AR collection straight from the AR dashboard's
+ // open invoices (Money Owed + due dates), so the 13-week reflects the real
+ // $567k AR - not the legacy pay-day model (which leaked too much past the
+ // window because the Invoice Tracker has no real paid-date column).
+ if (opts.direction !== 'past') {
+ try {
+ const { getArWeeklyCollection } = await import('./arDashboardOpen.js');
+ const arWk = await getArWeeklyCollection(weeks.map((w) => ({ start: w.start, end: w.end })));
+ for (let i = 0; i < WEEKS; i++) nonGelatoArCollections[i] = arWk[i] ?? 0;
+ if (arWk.some((v) => v > 0)) nonGelatoArSource = 'live';
+ } catch (e) {
+ warnings.push(`AR weekly collection failed (${e instanceof Error ? e.message : '?'}).`);
+ }
+ }
+
  // PAST view: the live AR projection + Gelato-pending placement are forward-
  // looking and read ~0 on already-collected weeks. Recompute the inflow the
  // BUDGETED way - "what we'd have forecast for that week": every Gelato batch
@@ -453,10 +468,18 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // Monthly run-rate from the RECENT 3 months - reflects the current spend
  // level, not a stale full-history average (spend stepped down through 2026).
  function monthlyRunRate(values: number[]): number {
- const v = (values ?? []).filter((x) => typeof x === 'number');
- if (v.length === 0) return 0;
- const recent = v.slice(-3);
- return recent.length > 0 ? recent.reduce((s, x) => s + x, 0) / recent.length : 0;
+ let recent = (values ?? []).filter((x) => typeof x === 'number').slice(-3);
+ if (recent.length === 0) return 0;
+ // Floor negative months (tax refunds / credits / reclassifications are not
+ // an ongoing expense - they were dragging categories like Taxes negative).
+ recent = recent.map((x) => Math.max(0, x));
+ // Cap a one-time spike so a single big charge (e.g. a one-off $184k R&D bill)
+ // doesn't inflate the run-rate. Normal lumpiness (a ~2x month like inventory)
+ // is kept: only a month > 3x the window median is capped to the median.
+ const sorted = [...recent].sort((a, b) => a - b);
+ const median = sorted[Math.floor(sorted.length / 2)];
+ if (median > 0) recent = recent.map((x) => (x > median * 3 ? median : x));
+ return recent.reduce((s, x) => s + x, 0) / recent.length;
  }
  for (const r of combined.rows ?? []) {
  const monthly = monthlyRunRate(r.values ?? []);
@@ -523,6 +546,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // "Non-Gelato AR Collections" so existing open invoices vs new (not-yet-booked)
  // invoices can be compared.
  const bWholesale = salesForecast?.buckets.wholesale.weeklyInflow ?? new Array(WEEKS).fill(0);
+ const bWholesaleGross = salesForecast?.buckets.wholesale.weeklyGross ?? new Array(WEEKS).fill(0);
  const projectedRaw = new Array(WEEKS).fill(0).map((_, i) =>
   +(bWholesale[i] ?? 0).toFixed(2),
  );
@@ -552,12 +576,11 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  } catch (e) {
  warnings.push(`Same-week rate failed (${e instanceof Error ? e.message : '?'}) - new sales treated as all-lag.`);
  }
- for (let i = 0; i < WEEKS; i++) {
- const newSales = projectedSalesWeekly[i];
- const immediate = +(newSales * sameWeekRate).toFixed(2);
- nonGelatoArCollections[i] = +(nonGelatoArCollections[i] + (newSales - immediate)).toFixed(2);
- projectedSalesWeekly[i] = immediate;
- }
+ // AR Collections row = the open-AR collection ONLY (from the AR dashboard's
+ // $567k). New-sales cash stays its own row ("New sales collections") - we no
+ // longer fold the lagged part into AR, so the AR number stays clean and
+ // matches the dashboard. (Same-week rate kept only for the row note.)
+ void bWholesaleGross;
  if (nonGelatoArCollections.some((v) => v > 0)) nonGelatoArSource = nonGelatoArSource === 'none' ? 'computed' : nonGelatoArSource;
  const sameWeekPct = (sameWeekRate * 100).toFixed(0);
 
@@ -605,56 +628,58 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
 
  // (gelatoBreakdown is built above, where the gelato result is in scope.)
 
- // Projected new sales - Little Tree (wholesale) only.
- const projBreakdown: CashflowBreakdownItem[] = salesForecast ? [
- { label: 'Little Tree (new invoices)', amount: +salesForecast.buckets.wholesale.scenarioTotals.base.cash.toFixed(2), sub: '13-wk cash · base case' },
- ] : [];
+ // Breakdowns are sized to MATCH each row's 13-week total, so the modal's
+ // "total $X" equals the row total (no more mismatch).
+ const grossSales13w = salesGrossWeekly.reduce((s, v) => s + v, 0);
+ const sameWeekCash13w = projectedSalesWeekly.reduce((s, v) => s + v, 0);
+ const openArCollections13w = arProjection ? arProjection.arByWeek.reduce((s, v) => s + v, 0) : 0;
+ const newSalesCashTotal = bWholesale.reduce((s, v) => s + (v ?? 0), 0);
+ const laggedNewSales13w = Math.max(0, newSalesCashTotal - sameWeekCash13w);
 
- // Little Tree AR - top customers by open balance behind the projection.
- const ltByCust = new Map<string, number>();
- if (arProjection) {
- for (const pl of arProjection.placements) {
- ltByCust.set(pl.customer, (ltByCust.get(pl.customer) ?? 0) + (pl.openBalance ?? 0));
- }
- }
- const ltBreakdown: CashflowBreakdownItem[] = [...ltByCust.entries()]
- .sort((a, b) => b[1] - a[1])
- .slice(0, 30)
- .map(([cust, amt]) => ({ label: cust, amount: +amt.toFixed(2), sub: 'open balance' }));
+ // Past AR row = open-invoice collections + the lagged share of new sales.
+ const pastArBreakdown: CashflowBreakdownItem[] = [
+ { label: 'Open invoices (collectible)', amount: +openArCollections13w.toFixed(2), sub: '13-wk collections · haircut applied' },
+ { label: 'Lagged new sales', amount: +laggedNewSales13w.toFixed(2), sub: `the ${100 - +sameWeekPct}% collecting after the sale week` },
+ ].filter((x) => x.amount > 0.5);
+
+ // Little Tree Sales (gross, reference) and Weekly Cash Collection (same-week).
+ const salesGrossBreakdown: CashflowBreakdownItem[] = [
+ { label: 'Little Tree (gross new sales)', amount: +grossSales13w.toFixed(2), sub: 'gross forecast · base case' },
+ ];
+ const sameWeekBreakdown: CashflowBreakdownItem[] = [
+ { label: 'Little Tree same-week cash', amount: +sameWeekCash13w.toFixed(2), sub: `${sameWeekPct}% of gross · collected the same week` },
+ ];
 
  // 5. Assemble lines.
  const inflows: CashflowLine[] = [
  {
  label: 'Gelato AR Collections (Net 97)',
  source: gelatoArSource,
- note: 'Pending Gelato batches placed at issue + 97 days (Net 90 + 7-day buffer)',
+ note: 'Pending Gelato batches · placed at issue + 97 days',
  values: gelatoArCollections,
  breakdown: gelatoBreakdown,
  },
  {
  label: 'Past AR Collections (lag-curve)',
  source: nonGelatoArSource,
- note: (arProjection
- ? `Open invoices placed at each customer's typical pay-day (median±σ from paid history) · collectibility haircut applied - ${(arProjection.projectedCollectibilityRate * 100).toFixed(0)}% of open AR booked as cash`
- : 'Per-channel collection curve from Invoice Tracker')
- + ` · PLUS the lagged ${100 - +sameWeekPct}% of new sales that don't collect the same week (they age into AR and collect later)`,
+ note: `Open invoices from the AR dashboard ($ Money Owed) collecting by due date — overdue spread over the next 4 weeks. Matches the AR tab.`,
  values: nonGelatoArCollections,
- breakdown: ltBreakdown,
+ breakdown: pastArBreakdown,
  },
  {
  label: 'Sales (this week, forecast)',
  source: salesGrossSource,
- note: `Gross Little Tree (wholesale) sales forecast for the week (reference only - NOT added to cash). The cash from these sales shows up as "Collected from sales" (same week) + "Past AR Collections" (the rest, later).`,
+ note: 'Gross Little Tree sales forecast — reference only, not added to cash',
  values: salesGrossWeekly,
  displayOnly: true,
- breakdown: projBreakdown,
+ breakdown: salesGrossBreakdown,
  },
  {
- label: 'Collected from sales (this week)',
+ label: 'New sales collections',
  source: projectedSalesSource,
- note: `Same-week cash only: ${sameWeekPct}% of new sales collect the week they're invoiced (from paid history). The other ${100 - +sameWeekPct}% collects later and is shown in Past AR Collections above.`,
+ note: `Cash from NEW Little Tree sales (not yet invoiced), collected over time via the lag curve. Separate from the open-AR row above.`,
  values: projectedSalesWeekly,
- breakdown: projBreakdown,
+ breakdown: sameWeekBreakdown,
  },
  ];
 
@@ -663,7 +688,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  label: 'Inventory & Raw Materials',
  source: opexSource,
  note: invMonthlyAvg > 0
- ? `Recent 3-mo run-rate $${Math.round(invMonthlyAvg).toLocaleString()}/mo · back-loaded within the month (real purchase timing 18/26/26/30% by week)`
+ ? `~$${Math.round(invMonthlyAvg).toLocaleString()}/mo · weighted to month-end`
  : 'No inventory data',
  values: invByWeek,
  breakdown: invBreakdown,
@@ -672,7 +697,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  label: 'Payroll',
  source: payrollSource,
  note: payrollMonthlyAvg > 0
- ? `Recent 3-mo run-rate $${Math.round(payrollMonthlyAvg).toLocaleString()}/mo · bi-weekly cadence (assumed - confirm via QB pay dates)`
+ ? `~$${Math.round(payrollMonthlyAvg).toLocaleString()}/mo · bi-weekly`
  : 'No payroll data',
  values: payrollByWeek,
  breakdown: payrollBreakdown,
@@ -681,7 +706,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  label: 'Software & Subscriptions',
  source: opexSource,
  note: subsMonthlyAvg > 0
- ? `Recent 3-mo run-rate $${Math.round(subsMonthlyAvg).toLocaleString()}/mo · spread evenly`
+ ? `~$${Math.round(subsMonthlyAvg).toLocaleString()}/mo · spread evenly`
  : 'No subscriptions data',
  values: subsByWeek,
  breakdown: subsBreakdown,
@@ -690,7 +715,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  label: 'Other Expenses',
  source: opexSource,
  note: otherMonthlyAvg > 0 || rentMonthly > 0
- ? `Recent 3-mo run-rate · Rent $${Math.round(rentMonthly).toLocaleString()}/mo lumped on the 1st, other categories ($${Math.round(otherMonthlyAvg).toLocaleString()}/mo) spread evenly`
+ ? `~$${Math.round(otherMonthlyAvg).toLocaleString()}/mo spread evenly · rent $${Math.round(rentMonthly).toLocaleString()}/mo on the 1st`
  : 'No other-expense data',
  values: otherByWeek,
  breakdown: otherBreakdown,
@@ -699,7 +724,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  label: `Credit Card Payments`,
  source: ccScheduleSource,
  note: ccPayments.length > 0
- ? `Per-card schedule · ${ccPayments.length} payments across ${ccByWeek.filter((v) => v > 0).length} weeks · total $${Math.round(ccByWeek.reduce((s, v) => s + v, 0)).toLocaleString()}`
+ ? `${ccPayments.length} payments · $${Math.round(ccByWeek.reduce((s, v) => s + v, 0)).toLocaleString()} total`
  : `No CC schedule (Tiller CC total: $${Math.round(ccPayoff).toLocaleString()})`,
  values: ccByWeek,
  breakdown: ccBreakdown,

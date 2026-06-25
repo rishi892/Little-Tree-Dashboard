@@ -547,8 +547,8 @@ export async function invalidateAllCaches(): Promise<{ ok: boolean; cachesCleare
  return res.json();
 }
 
-export async function fetchSalesWeekInvoices(weekStart: string): Promise<SalesWeekInvoicesResponse> {
- const res = await fetch(`/api/sales-week-invoices?weekStart=${encodeURIComponent(weekStart)}`);
+export async function fetchSalesWeekInvoices(weekStart: string, bucket: SalesBucket = 'wholesale'): Promise<SalesWeekInvoicesResponse> {
+ const res = await fetch(`/api/sales-week-invoices?weekStart=${encodeURIComponent(weekStart)}&bucket=${encodeURIComponent(bucket)}`);
  if (!res.ok) {
   const body = await res.json().catch(() => ({ error: 'Failed' }));
   throw new Error(body.error || 'Failed to fetch week invoices');
@@ -1925,6 +1925,134 @@ export async function saveCashflowOverrides(next: CashflowOverrides): Promise<Ca
  body: JSON.stringify(next),
  });
  if (!res.ok) throw new Error(`Failed to save overrides: ${res.status}`);
+ return res.json();
+}
+
+// Expense head overrides (Expenses → Edit tab). head → { monthly amount, who
+// edited, when }. Display-only; does not affect the cashflow.
+export type ExpenseOverride = { value: number; by: string; at: string };
+export type ExpenseOverrides = Record<string, ExpenseOverride>;
+
+export async function fetchExpenseOverrides(): Promise<ExpenseOverrides> {
+ const res = await fetch('/api/expense-overrides');
+ if (!res.ok) throw new Error(`Failed to load expense overrides: ${res.status}`);
+ return res.json();
+}
+
+export async function saveExpenseOverrides(values: Record<string, number>): Promise<ExpenseOverrides> {
+ const res = await fetch('/api/expense-overrides', {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({ overrides: values, by: currentUserName() }),
+ });
+ if (!res.ok) throw new Error(`Failed to save expense overrides: ${res.status}`);
+ return res.json();
+}
+
+// AR open invoices (Projections → AR tab) - matches the AR dashboard's Little
+// Tree open AR (full, no 12-month stale cutoff).
+export type ArOpenInvoice = {
+ invoiceNumber: string; customer: string; brand: string; issueDate: string;
+ amount: number; daysOut: number; bucket: string; status: string; infusedOrigin: boolean;
+};
+export type ArOpenResult = {
+ asOfDate: string; grossAr: number; invoiceCount: number;
+ buckets: Record<string, number>; invoices: ArOpenInvoice[];
+ segments: { all: number; littleTree: number; infusedOrigin: number };
+};
+export async function fetchArOpenInvoices(): Promise<ArOpenResult> {
+ const res = await fetch('/api/ar-open-invoices');
+ if (!res.ok) throw new Error(`Failed to load AR open invoices: ${res.status}`);
+ return res.json();
+}
+
+// AR projection methodology (Projections → AR tab). Per-customer collection lag,
+// collectibility haircut, lag curve, weekly placements.
+export type ArLagCurvePoint = { lag: number; pctOfInvoiced: number };
+export type ArChannelStat = {
+ channel: string; sampleInvoiceCount: number; totalInvoiced: number;
+ totalCollected: number; collectionRate: number; curve: ArLagCurvePoint[]; source: string;
+};
+export type ArPlacementRow = {
+ customer: string; channel: string; invoiceNumber: string; invoiceDate: string;
+ amount: number; paidAmount: number; openBalance: number; status: string;
+ currentLag: number; collectibility: number; projectedCollectible: number;
+ placements: Array<{ targetMonth: string; amount: number; weekIndices: number[] }>;
+};
+export type ArProjectionResult = {
+ weeks: Array<{ index: number; start: string; end: string; label: string }>;
+ arByWeek: number[];
+ buckets: { overdueWk1: number; openInWindow: number; openAfterWindow: number; futureProjected: number };
+ channelStats: ArChannelStat[];
+ globalCurve: ArLagCurvePoint[];
+ globalCollectionRate: number;
+ placements: ArPlacementRow[];
+ globalAvgCollectionDays: number;
+ dailyRunRate: number;
+ projectedCollectibilityRate: number;
+ warnings: string[];
+};
+
+export async function fetchArProjection(): Promise<ArProjectionResult> {
+ const res = await fetch('/api/ar-projection');
+ if (!res.ok) throw new Error(`Failed to load AR projection: ${res.status}`);
+ return res.json();
+}
+
+// The signed-in user's display name (set by login in sessionStorage). Used to
+// attribute manual edits ("edited by …"). Falls back to the email local-part.
+export function currentUserName(): string {
+ try {
+ const name = sessionStorage.getItem('lt_name');
+ if (name && name.trim()) return name.trim();
+ const email = sessionStorage.getItem('lt_user') || '';
+ if (email) return email.split('@')[0].split(/[._]/)[0];
+ } catch { /* SSR / blocked storage */ }
+ return 'Unknown';
+}
+
+// Unified cashflow cell edits (inflow Sales/AR + outflow expenses), persisted in
+// Supabase with attribution. Key = `${rowLabel}|${weekStart}`.
+export type CellEdit = { value: number; by: string; at: string };
+export type CashflowEdits = Record<string, CellEdit>;
+
+export async function fetchCashflowEdits(): Promise<CashflowEdits> {
+ const res = await fetch('/api/cashflow-edits');
+ if (!res.ok) throw new Error(`Failed to load cashflow edits: ${res.status}`);
+ return res.json();
+}
+
+export async function saveCashflowEdits(set: Record<string, number>, clear: string[] = []): Promise<CashflowEdits> {
+ const res = await fetch('/api/cashflow-edits', {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({ set, clear, by: currentUserName() }),
+ });
+ if (!res.ok) throw new Error(`Failed to save cashflow edits: ${res.status}`);
+ const data = await res.json();
+ // Tell every view (monthly edit, weekly edit, 13-Week grid) to refresh so an
+ // edit in one place shows in the others instantly.
+ try { window.dispatchEvent(new Event('cashflow-edits-changed')); } catch { /* SSR */ }
+ return data;
+}
+
+// Sales + AR forecast overrides (Sales → Edit tab). Per-week amounts keyed by
+// week-start (YYYY-MM-DD). Display-only; does not affect the cashflow.
+export type ForecastOverrides = { sales: Record<string, number>; ar: Record<string, number> };
+
+export async function fetchForecastOverrides(): Promise<ForecastOverrides> {
+ const res = await fetch('/api/forecast-overrides');
+ if (!res.ok) throw new Error(`Failed to load forecast overrides: ${res.status}`);
+ return res.json();
+}
+
+export async function saveForecastOverrides(next: ForecastOverrides): Promise<ForecastOverrides> {
+ const res = await fetch('/api/forecast-overrides', {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify(next),
+ });
+ if (!res.ok) throw new Error(`Failed to save forecast overrides: ${res.status}`);
  return res.json();
 }
 

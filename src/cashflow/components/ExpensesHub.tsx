@@ -2,14 +2,16 @@ import { useEffect, useState } from 'react';
 import { onCfoNav } from '../cfoNav';
 import { MappedExpensesPage } from './MappedExpensesPage';
 import { MonthlySummary } from './MonthlySummary';
+import { ExpenseEditPage } from './ExpenseEditPage';
 
-export type ExpensesTab = 'monthly' | 'combined' | 'purex' | 'moysh';
+export type ExpensesTab = 'monthly' | 'combined' | 'purex' | 'moysh' | 'edit';
 
 const TABS: Array<{ key: ExpensesTab; label: string }> = [
  { key: 'monthly', label: 'Monthly LT vs PureX' },
  { key: 'combined', label: 'Combined' },
  { key: 'purex', label: 'PureX' },
  { key: 'moysh', label: 'Moysh' },
+ { key: 'edit', label: '✎ Edit' },
 ];
 
 export function ExpensesHub() {
@@ -17,7 +19,7 @@ export function ExpensesHub() {
 
  // CFO Copilot "show me" - switch to the expenses sub-tab it points at.
  useEffect(() => onCfoNav((d) => {
- if (['monthly', 'combined', 'purex', 'moysh'].includes(d.tab)) setTab(d.tab as ExpensesTab);
+ if (['monthly', 'combined', 'purex', 'moysh', 'edit'].includes(d.tab)) setTab(d.tab as ExpensesTab);
  }), []);
 
  return (
@@ -61,6 +63,7 @@ export function ExpensesHub() {
  totalLabel="MOYSH (OTHER) TOTAL"
  />
  </div>
+ <div style={{ display: tab === 'edit' ? 'block' : 'none' }}><ExpenseEditPage /></div>
  </>
  );
 }

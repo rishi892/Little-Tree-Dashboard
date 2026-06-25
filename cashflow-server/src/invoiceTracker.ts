@@ -31,7 +31,8 @@ export type InvoiceRow = {
  customer: string;
  amount: number;
  paid: number;
- openBalance: number; // amount − paid
+ moneyOwed: number;   // col 6 "Money Owed" - the sheet's authoritative outstanding
+ openBalance: number; // = Money Owed (dashboard rule), falls back to amount − paid
  paidDate: string;
  status: string; // Paid | Overdue | Underpaid | Collection | Write off | ""
  link: string; // col 9 - Intuit CommerceNetwork share URL (when populated)
@@ -332,7 +333,13 @@ export async function getInvoiceTracker(): Promise<InvoiceTrackerResult> {
  const link = hyperlinkUrl || (/^https?:\/\//i.test(cellText) ? cellText : '');
  const { brand, source: brandSource } = resolveBrand(r[12] ?? '', customer);
  const email = (r[13] ?? '').trim();
- const openBalance = +(amount - paid).toFixed(2);
+ // Open balance = the AR dashboard's rule: use the sheet's "Money Owed"
+ // column (col 6) when set, else amount − paid, and treat paid invoices as
+ // zero. This makes every AR number (cashflow Past AR, aging, etc.) match the
+ // AR dashboard exactly - "Money Owed" is the authoritative outstanding.
+ const moneyOwed = parseMoney(r[6] ?? '');
+ const isPaid = /^paid$/i.test(status) || (paid >= amount && amount > 0 && moneyOwed === 0);
+ const openBalance = +(moneyOwed > 0 ? moneyOwed : (isPaid ? 0 : Math.max(0, amount - paid))).toFixed(2);
  const key = `${inv}|${customer.toLowerCase()}`;
  if (seen.has(key)) continue;
  seen.add(key);
@@ -343,6 +350,7 @@ export async function getInvoiceTracker(): Promise<InvoiceTrackerResult> {
  customer,
  amount,
  paid,
+ moneyOwed,
  openBalance,
  paidDate,
  status,
