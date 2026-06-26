@@ -9,7 +9,9 @@ import {
  type PastWeeksGridItem, type WeekActuals,
  type WeekExpenseLines, type ExpectedInflowWeek, type CashflowEdits,
  type CollectedDetail, type CollectedInvoice, type ExpenseEntriesRange, type ExpenseEntry, type CombinedActual,
+ fetchPnlExpenses, type PnlExpensesResult,
 } from '../api';
+import { BillDrillModal } from './BillDrillModal';
 import { CollapsibleSection } from './CollapsibleSection';
 import InfoTip from '../../ar/dashboard/components/InfoTip.jsx';
 import { formatCurrency, formatSigned } from '../format';
@@ -122,6 +124,38 @@ export function CashFlow13Week() {
  const [salesScenario, setSalesScenario] = useState<'worst' | 'base' | 'best'>('base');
  // Row whose breakdown modal ("what's included") is open.
  const [breakdownLine, setBreakdownLine] = useState<CashflowLine | null>(null);
+ // QB-based heads behind each outflow line (cash basis + your mapping), so the
+ // "what's included" modal shows the real accounts and drills to their bills.
+ const [pnlExp, setPnlExp] = useState<PnlExpensesResult | null>(null);
+ const [billAccount, setBillAccount] = useState<string | null>(null);
+ useEffect(() => {
+ const loadPnl = () => void fetchPnlExpenses({ method: 'Cash' }).then(setPnlExp).catch(() => {});
+ loadPnl();
+ // A mapping change (P&L Mapping tab) re-buckets the outflow heads - reload
+ // the QB heads so the "what's included" drill-downs stay in sync at once.
+ window.addEventListener('category-overrides-changed', loadPnl);
+ return () => window.removeEventListener('category-overrides-changed', loadPnl);
+ }, []);
+ // Map a 13-week outflow label to its QB accounts (from pnl-expenses), matching
+ // the backend's outflow heads (Payroll / COGS / Rent / Software / Other / CC).
+ const qbHeadsFor = (label: string): { name: string; total: number; monthly: number[] }[] => {
+ if (!pnlExp) return [];
+ const cats = pnlExp.categories;
+ const isCogs = (n: string) => /^cogs/i.test(n);
+ const isRent = (n: string) => /rent|building lease/i.test(n);
+ const isBank = (n: string) => /bank & merchant/i.test(n);
+ if (/^payroll$/i.test(label)) return cats.find((c) => c.category === 'Payroll')?.accounts ?? [];
+ if (/^cogs$/i.test(label)) return cats.filter((c) => isCogs(c.category)).flatMap((c) => c.accounts);
+ if (/^rent$/i.test(label)) return cats.find((c) => isRent(c.category))?.accounts ?? [];
+ if (/software & subscriptions/i.test(label)) return cats.find((c) => c.category === 'Software & Subscriptions')?.accounts ?? [];
+ if (/credit card/i.test(label)) return cats.find((c) => isBank(c.category))?.accounts ?? [];
+ if (/other expenses/i.test(label)) {
+ return cats
+ .filter((c) => c.category !== 'Payroll' && c.category !== 'Software & Subscriptions' && !isCogs(c.category) && !isRent(c.category) && !isBank(c.category))
+ .map((c) => ({ name: c.category, total: c.total, monthly: c.monthly }));
+ }
+ return [];
+ };
  // Future cashflow ALWAYS fetched alongside past, so the past view can use
  // LIVE Wk1 projection (latest methodology) for the in-progress current week
  // instead of the stale Monday-morning snapshot value.
@@ -161,12 +195,31 @@ export function CashFlow13Week() {
  fetchCashflowOverrides().then(setOverrides).catch(() => { /* silent */ });
  }
  if (direction === 'past') {
- fetchCashflow13({ direction: 'future' }).then(setFutureData).catch(() => setFutureData(null));
- fetchPastWeeksGrid(13).then(setPastGrid).catch(() => setPastGrid(null));
+ // Past actuals + the live-future series back the past/actual/variance
+ // lenses. Fetch them ONCE - toggling between budgeted and a past lens
+ // shouldn't re-pull the whole variance grid every time (that's the
+ // "variance keeps loading" churn). They refresh on an edit, below.
+ if (!futureData) fetchCashflow13({ direction: 'future' }).then(setFutureData).catch(() => setFutureData(null));
+ if (!pastGrid) fetchPastWeeksGrid(13).then(setPastGrid).catch(() => setPastGrid(null));
  }
- const onEdit = () => load(false, true, direction);   // silent: sales edit → same-week + AR re-flow
+ const onEdit = () => {
+ load(false, true, direction);   // silent: sales edit → same-week + AR re-flow
+ if (direction === 'past') {
+ // An edit can move both the live-future series and the actuals, so
+ // refresh the variance inputs too (silently).
+ fetchCashflow13({ direction: 'future' }).then(setFutureData).catch(() => { /* keep prior */ });
+ fetchPastWeeksGrid(13).then(setPastGrid).catch(() => { /* keep prior */ });
+ }
+ };
  window.addEventListener('cashflow-edits-changed', onEdit);
- return () => { window.removeEventListener('cashflow-edits-changed', onEdit); };
+ // A mapping change re-buckets the outflow - silently re-pull so a newly
+ // categorized head shows in the 13-week without a manual refresh.
+ window.addEventListener('category-overrides-changed', onEdit);
+ return () => {
+ window.removeEventListener('cashflow-edits-changed', onEdit);
+ window.removeEventListener('category-overrides-changed', onEdit);
+ };
+ // eslint-disable-next-line react-hooks/exhaustive-deps
  }, [direction]);
 
  function bufferedValue(weekIdx: number): string {
@@ -338,26 +391,56 @@ export function CashFlow13Week() {
 
  return (
  <>
- {breakdownLine && createPortal(
+ {breakdownLine && (() => {
+ const qb = qbHeadsFor(breakdownLine.label);
+ const sheet = breakdownLine.breakdown ?? [];
+ const useQb = qb.length > 0;
+ // QB account rows drill to bills; the aggregated "Other" categories don't.
+ const drillable = useQb && !/other expenses/i.test(breakdownLine.label);
+ // 13-week is a forward weekly projection, so each head's per-week figure is a
+ // RECENCY run-rate (last 3 completed months, like the 13-week outflow model),
+ // not a flat average of the whole period - so it reflects the recent trend.
+ const WPM = 52 / 12; // ~4.33 weeks per month
+ const perWeek = (monthly: number[]) => {
+ const recent = monthly.slice(-3).filter((v) => v !== 0); // skip empty / in-progress months
+ const monthlyRunRate = recent.length ? recent.reduce((s, v) => s + v, 0) / recent.length : 0;
+ return monthlyRunRate / WPM;
+ };
+ const items: { label: string; amount: number; sub?: string }[] = useQb
+ ? [...qb].sort((a, b) => perWeek(b.monthly) - perWeek(a.monthly)).map((h) => ({ label: h.name, amount: perWeek(h.monthly) }))
+ : sheet.map((b) => ({ label: b.label, amount: b.amount, sub: b.sub }));
+ const total = items.reduce((s, it) => s + it.amount, 0);
+ return createPortal(
  <div className="cm-modal-backdrop" style={{ zIndex: 10000 }} onClick={() => setBreakdownLine(null)}>
- <div className="cm-modal" style={{ width: 'min(560px, 100%)', margin: 'auto' }} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+ <div className="cm-modal" style={{ width: 'min(620px, 100%)', margin: 'auto' }} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
  <div className="cm-modal-head">
  <div className="cm-head-left">
  <div>
  <div className="cm-title">{breakdownLine.label}</div>
- <div className="cm-sub">What’s included · {(breakdownLine.breakdown ?? []).length} items · total {formatCurrency((breakdownLine.breakdown ?? []).reduce((s, b) => s + b.amount, 0))}</div>
+ <div className="cm-sub">
+ {useQb ? 'From QuickBooks (cash basis), your mapping' : "What's included"} · {items.length} items · {useQb ? `${formatCurrency(Math.round(total))} / week` : `total ${formatCurrency(Math.round(total))}`}
+ {drillable ? ' · click a row for its bills' : ''}
+ </div>
  </div>
  </div>
  <button className="cm-modal-close" onClick={() => setBreakdownLine(null)} aria-label="Close">✕</button>
  </div>
  <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
  <table className="data-table">
- <thead><tr><th>Item</th><th className="num">Amount</th></tr></thead>
+ <thead><tr><th>Item</th><th className="num">{useQb ? 'Per week' : 'Amount'}</th></tr></thead>
  <tbody>
- {(breakdownLine.breakdown ?? []).map((b, i) => (
- <tr key={i}>
- <td><div>{b.label}</div>{b.sub && <div className="vendor-note">{b.sub}</div>}</td>
- <td className="num">{formatCurrency(b.amount)}</td>
+ {items.map((it, i) => (
+ <tr
+ key={i}
+ style={drillable ? { cursor: 'pointer' } : undefined}
+ onClick={drillable ? () => setBillAccount(it.label) : undefined}
+ title={drillable ? 'Click to see every QuickBooks bill behind this amount' : undefined}
+ >
+ <td>
+ <div style={drillable ? { color: 'var(--accent)' } : undefined}>{it.label}</div>
+ {it.sub ? <div className="vendor-note">{it.sub}</div> : null}
+ </td>
+ <td className="num">{formatCurrency(Math.round(it.amount))}</td>
  </tr>
  ))}
  </tbody>
@@ -366,7 +449,9 @@ export function CashFlow13Week() {
  </div>
  </div>,
  document.body,
- )}
+ );
+ })()}
+ {billAccount && <BillDrillModal account={billAccount} onClose={() => setBillAccount(null)} />}
  <div className="page-head">
  <div>
  <h1 className="page-title">13-Week Cash Flow {view !== 'budgeted' && <span style={{ fontSize: 14, color: 'var(--muted)', fontWeight: 400 }}>· {view === 'past' ? 'Past Weeks' : view === 'actual' ? 'Actual' : 'Variance'}</span>}</h1>
@@ -1580,19 +1665,37 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
   }
  }
 
- // Month-mode outflow uses the deduped Combined (PureX+Moysh) actual = budget basis.
+ // Month-mode outflow = the QB actual for the month (combinedActual). The
+ // CURRENT month keeps settling in QB, so the actual fills in over time.
  const selMonth = sel && mode === 'month' ? sel.items[0].monday.slice(0, 7) : '';
  useEffect(() => {
   if (!periodStart || !periodEnd) { setDetail(null); setExpenses(null); setCombined(null); return; }
-  let alive = true; setLoadingDetail(true);
-  Promise.all([
-   fetchCollectedDetail(periodStart, periodEnd),
-   fetchExpenseEntries(periodStart, periodEnd),
-   selMonth ? fetchCombinedActual(selMonth) : Promise.resolve(null),
-  ])
-   .then(([d, e, c]) => { if (alive) { setDetail(d); setExpenses(e); setCombined(c); setLoadingDetail(false); } })
-   .catch(() => { if (alive) { setDetail(null); setExpenses(null); setCombined(null); setLoadingDetail(false); } });
-  return () => { alive = false; };
+  let alive = true;
+  let retried = false;
+  // silent=true keeps the existing numbers on screen while refetching, and a
+  // transient failure (e.g. a cold current-month QB pull) does NOT blank them.
+  const run = (silent: boolean) => {
+   if (!silent) setLoadingDetail(true);
+   Promise.all([
+    fetchCollectedDetail(periodStart, periodEnd),
+    fetchExpenseEntries(periodStart, periodEnd),
+    selMonth ? fetchCombinedActual(selMonth) : Promise.resolve(null),
+   ])
+    .then(([d, e, c]) => { if (!alive) return; setDetail(d); setExpenses(e); setCombined(c); setLoadingDetail(false); })
+    .catch(() => {
+     if (!alive) return;
+     setLoadingDetail(false);
+     // Retry once after a transient hiccup so the actual isn't stranded as
+     // "pending" (the current-month P&L pull can fail cold, then succeed).
+     if (!retried) { retried = true; window.setTimeout(() => { if (alive) run(true); }, 1800); }
+    });
+  };
+  run(false);
+  // The current (in-progress) month keeps settling - refetch when the user
+  // returns to the tab so new QB entries flow in ("aate jaega"), no polling.
+  const onFocus = () => run(true);
+  window.addEventListener('focus', onFocus);
+  return () => { alive = false; window.removeEventListener('focus', onFocus); };
  }, [periodStart, periodEnd, selMonth]);
 
  if (!pastGrid) return <LoadingSection title="Variance" />;
@@ -1701,8 +1804,8 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
    </div>
    {mode === 'month' && combined && (
     <div className="vendor-note" style={{ marginBottom: 8 }}>
-     Outflow actual = <strong>{combined.isCurrentMonth ? 'PureX (live sheet)' : 'Combined (PureX + Moysh)'}</strong> · {combined.source}
-     {combined.isCurrentMonth && <span style={{ color: 'var(--danger)' }}> — Moysh for this month settles in QuickBooks after month-end (cash-basis lag).</span>}
+     Outflow actual = <strong>QuickBooks</strong> · {combined.source}
+     {combined.isCurrentMonth && <span style={{ color: 'var(--danger)' }}> · current month is partial (QB cash-basis settles after month-end).</span>}
     </div>
    )}
    <div className="table-wrap">
@@ -1711,7 +1814,7 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
       <th>Line item</th>
       <th className="num">Budget<div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}>{sel.label}</div></th>
       <th className="num">Actual<div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 400 }}>{periodTxt}</div></th>
-      <th className="num">Δ</th>
+      <th className="num">Variance</th>
      </tr></thead>
      <tbody>
       {rows.map((r, i) => {

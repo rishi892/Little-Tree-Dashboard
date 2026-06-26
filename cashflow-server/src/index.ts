@@ -27,6 +27,7 @@ import { getInflowSchedule, type InflowScheduleResult } from './inflowSchedule.j
 import { getSheetExpenses, type SheetExpensesResult } from './sheetExpenses.js';
 import { getMappedExpenses, invalidateMappedExpensesCache, type MappedExpensesResult, type SheetEntity } from './mappedExpenses.js';
 import { getQbPlReport, type QbPlReport } from './qbPlReport.js';
+import { computePnlExpenses } from './pnlExpenses.js';
 import { getQbBalanceSheet, type QbBalanceSheetReport } from './qbBalanceSheet.js';
 import { getAccountTransactions, type AccountTransactionsResult } from './accountTransactions.js';
 import { getInventoryPurchases, type InventoryPurchasesResult } from './inventoryPurchases.js';
@@ -358,7 +359,16 @@ const getCashflow13WeekCached = async (direction: 'future' | 'past', force = fal
  `cashflow-13week:v6:${direction}:${fp}`,
  5 * 60 * 1000,
  () => getCashflow13Week(direction === 'past' ? { direction: 'past' } : undefined),
- (d) => Array.isArray((d as { weeks?: unknown[] }).weeks) && (d as { weeks: unknown[] }).weeks.length > 0,
+ (d) => {
+ const r = d as { weeks?: unknown[]; warnings?: string[] };
+ if (!Array.isArray(r.weeks) || r.weeks.length === 0) return false;
+ // Self-heal: never cache a result where the QB expense pull failed (all
+ // outflows would be zero, e.g. a transient token break). Retry next time
+ // so the outflow budget reappears the moment QB recovers, instead of a
+ // zero-outflow snapshot getting stuck for the 5-min TTL.
+ if (r.warnings?.some((w) => /expense fetch failed/i.test(w))) return false;
+ return true;
+ },
  force,
  );
 };
@@ -1033,8 +1043,20 @@ app.get('/api/qb-pl-report', async (req, res, next) => {
  try {
  const method: QbPlMethod = req.query.method === 'Cash' ? 'Cash' : 'Accrual';
  const force = req.query.refresh === '1';
- const { data, cached } = await withDurableCache(`qb-pl-report:${method}`, QBPL_TTL_MS, () => getQbPlReport(method), () => true, force);
+ const { data, cached } = await withDurableCache(`qb-pl-report:${method}`, QBPL_TTL_MS, () => getQbPlReport(method, force), () => true, force);
  res.json({ cached, ...data });
+ } catch (err) { next(err); }
+});
+
+// Expenses straight from the QB P&L, grouped by YOUR category mapping (no sheet).
+// Reuses the cached P&L report + fresh overrides so it reflects mapping edits at once.
+app.get('/api/pnl-expenses', async (req, res, next) => {
+ try {
+ const method: QbPlMethod = req.query.method === 'Cash' ? 'Cash' : 'Accrual';
+ const force = req.query.refresh === '1';
+ const { data: report } = await withDurableCache(`qb-pl-report:${method}`, QBPL_TTL_MS, () => getQbPlReport(method, force), () => true, force);
+ const overrides = await loadOverrides();
+ res.json(computePnlExpenses(report, overrides));
  } catch (err) { next(err); }
 });
 

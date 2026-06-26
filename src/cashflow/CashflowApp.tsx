@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { disconnect, fetchDashboard, fetchStatus, fetchCashflow13, type DashboardData, type Cashflow13, type Status } from './api';
+import { disconnect, fetchDashboard, fetchStatus, fetchCashflow13, fetchMappedExpenses, type DashboardData, type Cashflow13, type Status } from './api';
 import { formatCurrency, formatMonths, formatSigned } from './format';
-import { KpiCard } from './components/KpiCard';
+import { KpiCard, type KpiBreakdownRow } from './components/KpiCard';
 import { Projection13WeekChart } from './components/Projection13WeekChart';
 import { Sidebar } from './components/Sidebar';
 import { ExpensesHub } from './components/ExpensesHub';
@@ -225,6 +225,28 @@ function DashboardView({
  error: string | null;
  onRefresh: () => void;
 }) {
+ // Top KPI cards: tap a card to (a) make it the green/active one and
+ // (b) toggle a popover explaining how that number is computed. State lives
+ // here (not in Dashboard) because the cards render in this component.
+ // Hooks must run before the early returns below (rules of hooks).
+ const [activeKpi, setActiveKpi] = useState(0);              // green card; default = Cash on hand
+ const [openKpi, setOpenKpi] = useState<number | null>(null); // which card's popover is open
+ const selectKpi = (i: number) => { setActiveKpi(i); setOpenKpi((o) => (o === i ? null : i)); };
+
+ // Turn a backend KPI breakdown into modal rows + a bold total row. Returns
+ // undefined when the backend hasn't shipped the field yet (graceful fallback).
+ const toBreakdownRows = (
+ items: { label: string; value: number }[] | undefined,
+ totalLabel: string,
+ totalValue: number,
+ ): KpiBreakdownRow[] | undefined =>
+ items && items.length
+ ? [
+ ...items.map((b) => ({ label: b.label, value: formatCurrency(b.value) })),
+ { label: totalLabel, value: formatCurrency(totalValue), strong: true },
+ ]
+ : undefined;
+
  // While the initial /api/status round-trip is in flight, render the
  // page header silently - no "Loading…" text or empty box. The KPI
  // tiles further down handle their own placeholder state.
@@ -280,7 +302,12 @@ function DashboardView({
  period="Live · same as Current Position"
  value={formatCurrency(data.currentCash)}
  sub="Checking + BMM + PureX bank + Due From PureX"
- highlight
+ active={activeKpi === 0}
+ open={openKpi === 0}
+ onClick={() => selectKpi(0)}
+ onClose={() => setOpenKpi(null)}
+ info={{ formula: 'Checking + BMM + PureX bank + Due From PureX/Gelato' }}
+ breakdown={toBreakdownRows(data.cashBreakdown, 'Total cash on hand', data.currentCash)}
  />
  <KpiCard
  label="Net cash last month"
@@ -288,6 +315,16 @@ function DashboardView({
  value={formatCurrency(data.netCashThisMonth)}
  sub={`${data.netCashLastMonthLabel ?? 'Prior'}: ${formatCurrency(data.netCashLastMonth)}`}
  trend={data.netCashThisMonth >= 0 ? 'up' : 'down'}
+ active={activeKpi === 1}
+ open={openKpi === 1}
+ onClick={() => selectKpi(1)}
+ onClose={() => setOpenKpi(null)}
+ info={{ formula: 'Month-end bank balance − prior month-end (Tiller delta)' }}
+ breakdown={[
+ { label: data.netCashThisMonthLabel ?? 'This month', value: formatSigned(data.netCashThisMonth), strong: true },
+ { label: data.netCashLastMonthLabel ?? 'Prior month', value: formatSigned(data.netCashLastMonth) },
+ { label: 'Month-over-month change', value: formatSigned(data.monthOverMonthChange) },
+ ]}
  />
  <KpiCard
  label="Monthly Burn"
@@ -295,6 +332,35 @@ function DashboardView({
  value={formatCurrency(data.avgMonthlyBurn)}
  sub="Inv + Payroll + Subs + Other (live)"
  trend="down"
+ active={activeKpi === 2}
+ open={openKpi === 2}
+ onClick={() => selectKpi(2)}
+ onClose={() => setOpenKpi(null)}
+ info={{ formula: 'Inventory + Payroll + Subscriptions + Other (avg / month)' }}
+ breakdown={toBreakdownRows(data.burnBreakdown, 'Total monthly burn', data.avgMonthlyBurn)}
+ loadBreakdown={async () => {
+ const me = await fetchMappedExpenses('Combined');
+ const items: { label: string; v: number }[] = [];
+ let sum = 0;
+ for (const r of me.rows ?? []) {
+ if (/software\s*&\s*subscriptions/i.test(r.category)) continue; // replaced by audit
+ const vals = r.values ?? [];
+ const total = vals.reduce((s, v) => s + v, 0);
+ const nonZero = vals.filter((v) => v > 0).length;
+ if (nonZero === 0) continue;
+ const runRate = total / nonZero;
+ sum += runRate;
+ items.push({ label: r.category, v: runRate });
+ }
+ items.sort((a, b) => b.v - a.v);
+ const rows: KpiBreakdownRow[] = items.map((it) => ({ label: it.label, value: formatCurrency(it.v) }));
+ // Subscriptions come from the active-subscription audit (server-side); show
+ // the remainder so the breakdown reconciles to the burn KPI total.
+ const subs = data.avgMonthlyBurn - sum;
+ if (subs > 1) rows.push({ label: 'Subscriptions (active audit)', value: formatCurrency(subs) });
+ rows.push({ label: 'Total monthly burn', value: formatCurrency(data.avgMonthlyBurn), strong: true });
+ return rows;
+ }}
  />
  <KpiCard
  label="Runway"
@@ -306,6 +372,16 @@ function DashboardView({
  : 'No burn data'
  }
  trend={data.runwayMonths === null ? 'up' : data.runwayMonths < 1 ? 'down' : 'up'}
+ active={activeKpi === 3}
+ open={openKpi === 3}
+ onClick={() => selectKpi(3)}
+ onClose={() => setOpenKpi(null)}
+ info={{ formula: 'Cash on hand ÷ Monthly Burn' }}
+ breakdown={[
+ { label: 'Cash on hand', value: formatCurrency(data.currentCash) },
+ { label: 'Monthly Burn', value: formatCurrency(data.avgMonthlyBurn) },
+ { label: 'Runway', value: formatMonths(data.runwayMonths), strong: true },
+ ]}
  />
  </div>
 

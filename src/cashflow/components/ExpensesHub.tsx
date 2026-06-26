@@ -2,16 +2,19 @@ import { useEffect, useState } from 'react';
 import { onCfoNav } from '../cfoNav';
 import { MappedExpensesPage } from './MappedExpensesPage';
 import { MonthlySummary } from './MonthlySummary';
+import { PnlMappingPage } from './PnlMappingPage';
 
 // Expense editing now lives ONLY in Projections → Expense (per-week, flows into
-// the 13-week cashflow), so it isn't duplicated here. This hub is view-only.
-export type ExpensesTab = 'monthly' | 'combined' | 'purex' | 'moysh';
+// the 13-week cashflow), so it isn't duplicated here. This hub is view-only,
+// except the Mapping tab which assigns P&L heads to expense categories.
+export type ExpensesTab = 'monthly' | 'combined' | 'purex' | 'moysh' | 'mapping';
 
 const TABS: Array<{ key: ExpensesTab; label: string }> = [
  { key: 'monthly', label: 'Monthly LT vs PureX' },
  { key: 'combined', label: 'Combined' },
  { key: 'purex', label: 'PureX' },
  { key: 'moysh', label: 'Moysh' },
+ { key: 'mapping', label: 'P&L Mapping' },
 ];
 
 export function ExpensesHub() {
@@ -19,7 +22,7 @@ export function ExpensesHub() {
 
  // CFO Copilot "show me" - switch to the expenses sub-tab it points at.
  useEffect(() => onCfoNav((d) => {
- if (['monthly', 'combined', 'purex', 'moysh'].includes(d.tab)) setTab(d.tab as ExpensesTab);
+ if (['monthly', 'combined', 'purex', 'moysh', 'mapping'].includes(d.tab)) setTab(d.tab as ExpensesTab);
  }), []);
 
  return (
@@ -63,6 +66,7 @@ export function ExpensesHub() {
  totalLabel="MOYSH (OTHER) TOTAL"
  />
  </div>
+ <div style={{ display: tab === 'mapping' ? 'block' : 'none' }}><PnlMappingPage /></div>
  </>
  );
 }

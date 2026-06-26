@@ -30,6 +30,10 @@ import { getGelatoAr } from './gelatoAr.js';
 import { getPureXBank } from './cashOnHand.js';
 import { getArProjection, type ArProjectionResult } from './arProjection.js';
 import { getMappedExpenses } from './mappedExpenses.js';
+import { computePnlExpenses } from './pnlExpenses.js';
+import { getQbPlReport } from './qbPlReport.js';
+import { loadOverrides } from './categoryOverrides.js';
+import { getInventoryPurchases } from './inventoryPurchases.js';
 import { getCcPaymentSchedule, type CcScheduledPayment } from './ccSchedule.js';
 import { getSalesForecast, type SalesForecastResult } from './salesForecast.js';
 import { captureSnapshotIfNeeded, getSnapshot, type WeeklySnapshot } from './weeklySnapshots.js';
@@ -152,7 +156,7 @@ function weekIndexFor(date: Date, weeks: CashflowWeek[]): number {
 }
 
 /** Spread a monthly amount on `billDay` of each month touched by the window. */
-function projectMonthly(billDay: number, monthly: number, weeks: CashflowWeek[]): number[] {
+function projectMonthly(billDay: number, monthly: number, weeks: CashflowWeek[], clampFirst = false): number[] {
  const out = new Array(weeks.length).fill(0);
  if (monthly <= 0 || weeks.length === 0) return out;
  const start = new Date(weeks[0].start + 'T00:00:00Z');
@@ -166,6 +170,13 @@ function projectMonthly(billDay: number, monthly: number, weeks: CashflowWeek[])
  if (billDate >= start) {
  const idx = weekIndexFor(billDate, weeks);
  if (idx >= 0) out[idx] += monthly;
+ } else if (clampFirst && i === 0) {
+ // The anchor month's bill day falls just BEFORE week 0 - e.g. the past
+ // view anchors at the first Monday (May 4) but rent is due May 1. Don't
+ // drop that month's lump; place it in the first week so the month still
+ // shows its rent. (Past only: a future plan must NOT pull an already-paid
+ // current-month rent into week 0.)
+ out[0] += monthly;
  }
  curMonth++;
  if (curMonth > 11) { curMonth = 0; curYear++; }
@@ -490,6 +501,10 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  let invByWeek: number[] = new Array(WEEKS).fill(0);
  let subsByWeek: number[] = new Array(WEEKS).fill(0);
  let otherByWeek: number[] = new Array(WEEKS).fill(0);
+ let rentByWeek: number[] = new Array(WEEKS).fill(0);
+ let invPurchByWeek: number[] = new Array(WEEKS).fill(0);
+ let invPurchMonthly = 0;
+ const invPurchItems: { label: string; monthly: number }[] = [];
  let payrollMonthlyAvg = 0;
  let invMonthlyAvg = 0;
  let subsMonthlyAvg = 0;
@@ -504,9 +519,23 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  const payrollItems: { label: string; monthly: number }[] = [];
  const invItems: { label: string; monthly: number }[] = [];
  const otherItems: { label: string; monthly: number }[] = [];
+ const rentItems: { label: string; monthly: number }[] = [];
  let subsItems: { label: string; monthly: number }[] = [];
  try {
- const combined = await getMappedExpenses('Combined');
+ // Outflow is driven by YOUR P&L mapping (QB cash basis), not the sheet:
+ // each category's accounts (Rishi, etc.) are the QB accounts you mapped, so
+ // run-rates + the per-account breakdown line up with what you see everywhere.
+ // Unmapped accounts ride along in "Other" so the total stays complete.
+ const [plReport, overrides] = await Promise.all([getQbPlReport('Cash'), loadOverrides()]);
+ const pnl = computePnlExpenses(plReport, overrides);
+ const combined = {
+ rows: pnl.categories.map((c) => ({
+ category: c.category,
+ group: (/^payroll$/i.test(c.category) ? 'Payroll' : 'Non-Payroll') as 'Payroll' | 'Non-Payroll',
+ values: c.monthly,
+ qbSources: c.accounts.map((a) => ({ name: a.name, total: a.total })),
+ })),
+ };
  // Monthly run-rate from the RECENT 3 months - reflects the current spend
  // level, not a stale full-history average (spend stepped down through 2026).
  function monthlyRunRate(values: number[]): number {
@@ -542,7 +571,9 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  if (r.group === 'Payroll') {
  payrollMonthlyAvg += monthly;
  pushExploded(payrollItems);
- } else if (/^inventory\s*&\s*raw materials$/i.test(cat)) {
+ } else if (/^inventory\s*&\s*raw materials$|^cogs\b/i.test(cat)) {
+ // COGS categories (Packaging, Compliance, Shipping, Other) are cost-of-goods /
+ // inventory spend, so they ride the Inventory & Raw Materials line.
  invMonthlyAvg += monthly;
  pushExploded(invItems);
  } else if (/software\s*&\s*subscriptions/i.test(cat)) {
@@ -551,24 +582,34 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  subsMonthlyAvg += monthly;
  pushExploded(subsItems);
  } else if (/rent|building lease/i.test(cat)) {
- // Rent is a fixed monthly lump (paid on the 1st), not a weekly trickle.
- // Kept inside the Other Expenses row but distributed as a month-start lump.
+ // Rent is its own outflow head: a fixed monthly lump paid on the 1st.
  rentMonthly += monthly;
- otherItems.push({ label: cat, monthly });
+ pushExploded(rentItems);
  } else {
  otherMonthlyAvg += monthly;
  otherItems.push({ label: cat, monthly });
  }
  }
+ // Inventory & Raw Materials is its OWN head, from the actual inventory-purchase
+ // trace (cash spent buying inventory - hits the inventory asset, not the P&L
+ // expense categories), so it does not double-count with COGS.
+ try {
+ const invPurch = await getInventoryPurchases();
+ invPurchMonthly = monthlyRunRate(invPurch.monthlyTotal ?? []);
+ const tot = (invPurch.byVendor ?? []).reduce((s, v) => s + v.total, 0) || 1;
+ for (const v of (invPurch.byVendor ?? [])) {
+ if (v.total > 0) invPurchItems.push({ label: v.vendor, monthly: invPurchMonthly * (v.total / tot) });
+ }
+ } catch { /* no inventory-purchase data - leave Inventory at 0 */ }
  // Pattern-based distribution (not flat): each category gets its real weekly
  // shape - payroll bi-weekly, inventory back-loaded, rent a month-start lump,
  // the rest spread evenly.
  payrollByWeek = payrollByWeekBiweekly(payrollMonthlyAvg, weeks);
- invByWeek = inventoryByWeek(invMonthlyAvg, weeks);
+ invByWeek = inventoryByWeek(invMonthlyAvg, weeks); // COGS line (your categories)
+ invPurchByWeek = inventoryByWeek(invPurchMonthly, weeks); // Inventory & Raw Materials
  subsByWeek = new Array(WEEKS).fill(subsMonthlyAvg / 4.33);
- const rentByWeek = projectMonthly(1, rentMonthly, weeks);
- const otherEvenByWeek = new Array(WEEKS).fill(otherMonthlyAvg / 4.33);
- otherByWeek = weeks.map((_, i) => +((otherEvenByWeek[i] ?? 0) + (rentByWeek[i] ?? 0)).toFixed(2));
+ rentByWeek = projectMonthly(1, rentMonthly, weeks, opts.direction === 'past'); // month-start lump, its own head (past: don't drop the anchor month)
+ otherByWeek = new Array(WEEKS).fill(otherMonthlyAvg / 4.33); // other only, no rent
  } catch (e) {
  warnings.push(`Combined-view expense fetch failed (${e instanceof Error ? e.message : '?'}) - all expense rows = 0.`);
  }
@@ -698,6 +739,8 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  const payrollBreakdown = toExpBd(payrollItems);
  const subsBreakdown = toExpBd(subsItems);
  const otherBreakdown = toExpBd(otherItems);
+ const rentBreakdown = toExpBd(rentItems);
+ const invPurchBreakdown = toExpBd(invPurchItems);
 
  // Credit-card payments grouped by card (only those due within the 13 weeks).
  const ccByCard = new Map<string, { amount: number; count: number }>();
@@ -773,9 +816,18 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  {
  label: 'Inventory & Raw Materials',
  source: opexSource,
+ note: invPurchMonthly > 0
+ ? `~$${Math.round(invPurchMonthly).toLocaleString()}/mo · inventory purchases, weighted to month-end`
+ : 'No inventory-purchase data',
+ values: invPurchByWeek,
+ breakdown: invPurchBreakdown,
+ },
+ {
+ label: 'COGS',
+ source: opexSource,
  note: invMonthlyAvg > 0
- ? `~$${Math.round(invMonthlyAvg).toLocaleString()}/mo · weighted to month-end`
- : 'No inventory data',
+ ? `~$${Math.round(invMonthlyAvg).toLocaleString()}/mo · COGS (packaging, compliance, shipping, other)`
+ : 'No COGS data',
  values: invByWeek,
  breakdown: invBreakdown,
  },
@@ -798,10 +850,19 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  breakdown: subsBreakdown,
  },
  {
+ label: 'Rent',
+ source: opexSource,
+ note: rentMonthly > 0
+ ? `~$${Math.round(rentMonthly).toLocaleString()}/mo · lump on the 1st`
+ : 'No rent data',
+ values: rentByWeek,
+ breakdown: rentBreakdown,
+ },
+ {
  label: 'Other Expenses',
  source: opexSource,
- note: otherMonthlyAvg > 0 || rentMonthly > 0
- ? `~$${Math.round(otherMonthlyAvg).toLocaleString()}/mo spread evenly · rent $${Math.round(rentMonthly).toLocaleString()}/mo on the 1st`
+ note: otherMonthlyAvg > 0
+ ? `~$${Math.round(otherMonthlyAvg).toLocaleString()}/mo spread evenly`
  : 'No other-expense data',
  values: otherByWeek,
  breakdown: otherBreakdown,

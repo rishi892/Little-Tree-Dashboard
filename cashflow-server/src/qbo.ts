@@ -113,6 +113,8 @@ export async function getMonthlyProfitAndLoss(startDate: string, endDate: string
 
 // --- Dashboard aggregator ---
 
+export type BreakdownItem = { label: string; value: number };
+
 export type DashboardData = {
  asOf: string;
  currentCash: number;
@@ -124,6 +126,10 @@ export type DashboardData = {
  avgMonthlyBurn: number; // positive number, average of negative net months
  runwayMonths: number | null; // null when burn <= 0
  monthly: MonthlyPoint[];
+ // Per-line composition of the headline KPIs, so the UI can show "how it's
+ // calculated" with live numbers that sum exactly to currentCash / avgMonthlyBurn.
+ cashBreakdown: BreakdownItem[]; // Checking + BMM + PureX bank + Due From PureX
+ burnBreakdown: BreakdownItem[]; // per-category run-rate + active-subscription audit
 };
 
 function ymd(d: Date): string {
@@ -147,7 +153,8 @@ export async function getDashboardData(monthsBack = 12): Promise<DashboardData> 
  const { getTillerBalances } = await import('./tiller.js');
  const t = await getTillerBalances();
  const BUSINESS_RE = /crb indirect|7561|business mm|0910/i;
- return t.cashAccounts.filter((a) => BUSINESS_RE.test(a.name)).reduce((s, a) => s + a.balance, 0);
+ const accounts = t.cashAccounts.filter((a) => BUSINESS_RE.test(a.name));
+ return { total: accounts.reduce((s, a) => s + a.balance, 0), accounts };
  } catch { return null; }
  })(),
  (async () => {
@@ -164,19 +171,26 @@ export async function getDashboardData(monthsBack = 12): Promise<DashboardData> 
  const { getCachedSubscriptionAudit, computeActiveSubscriptionsMonthly } = await import('./audit.js');
  const combined = await getMappedExpenses('Combined');
  let monthlyTotal = 0;
+ const breakdown: { label: string; value: number }[] = [];
  for (const r of combined.rows ?? []) {
  if (/software\s*&\s*subscriptions/i.test(r.category)) continue; // replaced by audit
  const total = (r.values ?? []).reduce((s, v) => s + v, 0);
  const nonZero = (r.values ?? []).filter((v) => v > 0).length;
- if (nonZero > 0) monthlyTotal += total / nonZero;
+ if (nonZero > 0) {
+ const runRate = total / nonZero;
+ monthlyTotal += runRate;
+ breakdown.push({ label: r.category, value: +runRate.toFixed(2) });
+ }
  }
  try {
  const audit = await getCachedSubscriptionAudit(16);
  const { activeMonthlySum } = computeActiveSubscriptionsMonthly(audit, 4);
  monthlyTotal += activeMonthlySum;
+ if (activeMonthlySum > 0) breakdown.push({ label: 'Subscriptions (active audit)', value: +activeMonthlySum.toFixed(2) });
  } catch { /* audit unavailable - leave subs at zero */ }
- return monthlyTotal;
- } catch { return 0; }
+ breakdown.sort((a, b) => b.value - a.value);
+ return { total: monthlyTotal, breakdown };
+ } catch { return { total: 0, breakdown: [] }; }
  })(),
  getMonthlyProfitAndLoss(ymd(start), ymd(end)),
  ]);
@@ -184,10 +198,13 @@ export async function getDashboardData(monthsBack = 12): Promise<DashboardData> 
  // (sab jagah ek): Tiller business banks (Checking + BMM) + PureX QB bank +
  // Due From PureX (Gelato). The QB part is fetched SEQUENTIALLY here (after the
  // Promise.all) to avoid a concurrent QB token refresh.
- let currentCash = tillerBalances ?? await getCashAccountsBalance();
+ let currentCash = tillerBalances?.total ?? await getCashAccountsBalance();
+ let pureXBank = 0, dueFromPurex = 0;
  try {
  const { getQbIntercompanyCash } = await import('./cashOnHand.js');
  const ic = await getQbIntercompanyCash();
+ pureXBank = ic.pureXBank;
+ dueFromPurex = ic.dueFromPurex;
  currentCash = +(currentCash + ic.pureXBank + ic.dueFromPurex).toFixed(2);
  } catch { /* QB unavailable - keep bank-only cash */ }
 
@@ -245,8 +262,15 @@ export async function getDashboardData(monthsBack = 12): Promise<DashboardData> 
  netLastLabel = substantive.at(-2)?.label ?? 'prior';
  }
 
- const avgMonthlyBurn = monthlyBurnTotal;
+ const avgMonthlyBurn = monthlyBurnTotal.total;
  const runwayMonths = avgMonthlyBurn > 0 && currentCash > 0 ? currentCash / avgMonthlyBurn : null;
+
+ // Cash-on-hand line items (sum to currentCash): the SAME 4 accounts the KPI uses.
+ const cashBreakdown: BreakdownItem[] = [
+ ...(tillerBalances?.accounts ?? []).map((a) => ({ label: a.name, value: +a.balance.toFixed(2) })),
+ { label: 'PureX bank (QB)', value: pureXBank },
+ { label: 'Due From PureX / Gelato', value: dueFromPurex },
+ ];
 
  return {
  asOf: new Date().toISOString(),
@@ -259,5 +283,7 @@ export async function getDashboardData(monthsBack = 12): Promise<DashboardData> 
  avgMonthlyBurn,
  runwayMonths,
  monthly: substantive,
+ cashBreakdown,
+ burnBreakdown: monthlyBurnTotal.breakdown,
  };
 }

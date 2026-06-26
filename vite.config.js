@@ -20,6 +20,11 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    // Make HMR reach the browser THROUGH an https tunnel (Cloudflare quick
+    // tunnel). The page is served over wss on 443, so the HMR client must
+    // connect to 443, not the dev port 5173. Without this, live updates never
+    // arrive over the tunnel and every change needs a manual hard-refresh.
+    hmr: { clientPort: 443, protocol: "wss" },
     // Allow tunnel hosts (Cloudflare quick tunnel, ngrok, etc.) — Vite 5
     // blocks unknown hosts by default since CVE-2025-24010. Wildcards via
     // leading "." match any subdomain.

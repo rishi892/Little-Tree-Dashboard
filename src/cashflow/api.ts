@@ -17,6 +17,9 @@ export type DashboardData = {
  avgMonthlyBurn: number;
  runwayMonths: number | null;
  monthly: MonthlyPoint[];
+ // Per-line KPI composition (optional: only present once the backend ships it).
+ cashBreakdown?: { label: string; value: number }[];
+ burnBreakdown?: { label: string; value: number }[];
 };
 
 export type Status = { connected: boolean; realmId: string | null; credsConfigured: boolean };
@@ -1071,6 +1074,12 @@ export async function fetchCategoryOverrides(): Promise<AllCategoryOverrides> {
  return res.json();
 }
 
+// Tell every open page that a mapping changed, so they reload immediately
+// (instead of waiting on a poll). Drives auto-propagation to Combined + 13-week.
+function notifyOverridesChanged() {
+ try { window.dispatchEvent(new Event('category-overrides-changed')); } catch { /* SSR */ }
+}
+
 export async function setCategoryOverride(account: string, override: CategoryOverride): Promise<AllCategoryOverrides> {
  const res = await fetch(`/api/category-overrides/${encodeURIComponent(account)}`, {
  method: 'PUT',
@@ -1078,19 +1087,25 @@ export async function setCategoryOverride(account: string, override: CategoryOve
  body: JSON.stringify(override),
  });
  if (!res.ok) throw new Error(`Status ${res.status}`);
- return res.json();
+ const json = await res.json();
+ notifyOverridesChanged();
+ return json;
 }
 
 export async function clearCategoryOverride(account: string): Promise<AllCategoryOverrides> {
  const res = await fetch(`/api/category-overrides/${encodeURIComponent(account)}`, { method: 'DELETE' });
  if (!res.ok) throw new Error(`Status ${res.status}`);
- return res.json();
+ const json = await res.json();
+ notifyOverridesChanged();
+ return json;
 }
 
 export async function clearAllCategoryOverrides(): Promise<AllCategoryOverrides> {
  const res = await fetch('/api/category-overrides', { method: 'DELETE' });
  if (!res.ok) throw new Error(`Status ${res.status}`);
- return res.json();
+ const json = await res.json();
+ notifyOverridesChanged();
+ return json;
 }
 
 // --- Inflow Schedule ---
@@ -2153,4 +2168,24 @@ export async function fetchCopilotChanges(since?: string): Promise<CopilotChange
  const res = await fetch(`/api/assistant/changes${qs}`);
  if (!res.ok) throw new Error(`changes failed: ${res.status}`);
  return res.json();
+}
+
+// --- Expenses straight from QB P&L, grouped by your category mapping (no sheet) ---
+export type PnlExpenseAccount = { name: string; monthly: number[]; total: number };
+export type PnlExpenseCategory = { category: string; monthly: number[]; total: number; accounts: PnlExpenseAccount[] };
+export type PnlExpensesResult = {
+  asOf: string;
+  months: string[];
+  monthLabels: string[];
+  categories: PnlExpenseCategory[];
+  mappedTotal: number;
+  unmappedTotal: number;
+  grandTotal: number;
+};
+export async function fetchPnlExpenses(opts: { method?: 'Cash' | 'Accrual'; refresh?: boolean } = {}): Promise<PnlExpensesResult> {
+  const qs = new URLSearchParams({ method: opts.method ?? 'Cash' });
+  if (opts.refresh) qs.set('refresh', '1');
+  const res = await fetch(`/api/pnl-expenses?${qs.toString()}`);
+  if (!res.ok) throw new Error(`pnl-expenses failed: ${res.status}`);
+  return res.json();
 }

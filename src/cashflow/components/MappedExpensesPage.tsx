@@ -1,10 +1,32 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
- fetchMappedExpenses, fetchAccountTransactions, fetchInventoryPurchases,
+ fetchMappedExpenses, fetchAccountTransactions, fetchInventoryPurchases, fetchPnlExpenses,
  type MappedExpensesResult, type SheetEntity, type AccountTxn,
- type InventoryPurchasesResult, type InventoryTxn,
+ type InventoryPurchasesResult, type InventoryTxn, type PnlExpensesResult,
 } from '../api';
 import { formatCurrency } from '../format';
+
+// Combined view is now driven by YOUR P&L mapping (QB cash basis), not the sheet:
+// each category's qbSources are the exact QB accounts you mapped, so the
+// per-account bill drill-down (account-transactions) lines up and works.
+function pnlToMapped(pnl: PnlExpensesResult): MappedExpensesResult {
+ return {
+  cached: false,
+  asOf: pnl.asOf,
+  entity: 'Combined',
+  months: pnl.months,
+  monthLabels: pnl.monthLabels,
+  rows: pnl.categories
+   .filter((c) => c.category !== 'Uncategorized')
+   .map((c) => ({
+    group: /payroll/i.test(c.category) ? 'Payroll' : 'Non-Payroll',
+    category: c.category,
+    values: c.monthly,
+    qbSources: c.accounts.map((a) => ({ name: a.name, total: a.total })),
+   })),
+  unmatched: [],
+ };
+}
 
 type Group = 'all' | 'Payroll' | 'Non-Payroll';
 
@@ -131,7 +153,9 @@ export function MappedExpensesPage({ entity, title, subtitle, totalLabel }: Prop
  // Fetch the mapped expenses first - render the page as soon as that's
  // ready so we don't block on the (potentially slow) inventory call.
  try {
- const mapped = await fetchMappedExpenses(entity, { refresh });
+ const mapped = entity === 'Combined'
+ ? pnlToMapped(await fetchPnlExpenses({ method: 'Cash', refresh }))
+ : await fetchMappedExpenses(entity, { refresh });
  setData(mapped);
  } catch (e) {
  if (!silent) setError(e instanceof Error ? e.message : 'Failed');
@@ -146,12 +170,14 @@ export function MappedExpensesPage({ entity, title, subtitle, totalLabel }: Prop
  }
  useEffect(() => {
  load(false);
- const poll = window.setInterval(() => load(false, true), 30_000);
- const onFocus = () => load(false, true);
- window.addEventListener('focus', onFocus);
+ // No focus/interval polling - the P&L is not a live ticker, so repeated
+ // background loads just churn. Reload (silently) ONLY when a mapping changes
+ // (here or in the P&L Mapping tab) so a newly-categorized head flows in at
+ // once. Use Refresh for a fresh QB pull.
+ const onMappingChanged = () => load(false, true);
+ window.addEventListener('category-overrides-changed', onMappingChanged);
  return () => {
- window.clearInterval(poll);
- window.removeEventListener('focus', onFocus);
+ window.removeEventListener('category-overrides-changed', onMappingChanged);
  };
  // eslint-disable-next-line react-hooks/exhaustive-deps
  }, [entity]);
@@ -212,6 +238,9 @@ export function MappedExpensesPage({ entity, title, subtitle, totalLabel }: Prop
  return slice.reduce((s, v) => s + v, 0) / slice.length;
  };
  const weeklyAvg = (vals: number[]) => last3Avg(vals) / 4.33;
+ // Seasonality windows: how much actually went out over the trailing 12 / 6 / 3
+ // months (totals, not averages), so recent trend vs the full year is obvious.
+ const sumLast = (vals: number[], n: number) => vals.slice(-n).reduce((s, v) => s + v, 0);
 
  if (loading && !data) {
  return (
@@ -275,22 +304,16 @@ export function MappedExpensesPage({ entity, title, subtitle, totalLabel }: Prop
  <th>Group</th>
  {data.monthLabels.map((m) => (<th key={m} className="num">{m}</th>))}
  <th className="num">Total</th>
- {entity === 'Combined' && (
- <>
- <th className="num" style={{ background: '#e1f5e9', color: '#1a6d3c' }}>PureX</th>
- <th className="num" style={{ background: '#fef0d8', color: '#945215' }}>Moysh</th>
- </>
- )}
+ <th className="num" style={{ background: '#eef2ff' }}>Last 12mo</th>
+ <th className="num" style={{ background: '#eef2ff' }}>Last 6mo</th>
+ <th className="num" style={{ background: '#eef2ff' }}>Last 3mo</th>
  <th className="num">Avg/mo</th>
- <th className="num">Last 3 mo avg</th>
  <th className="num">Weekly avg</th>
  </tr>
  </thead>
  <tbody>
  {visible.map((r) => {
  const total = r.values.reduce((s, v) => s + v, 0);
- const purexTotal = (r.purexValues ?? []).reduce((s, v) => s + v, 0);
- const moyshTotal = (r.moyshValues ?? []).reduce((s, v) => s + v, 0);
  const avg = total / Math.max(1, r.values.filter((v) => v !== 0).length);
  const drillable = r.qbSources.length > 0 && total > 0;
  const isExpanded = expandedCategory === r.category;
@@ -317,19 +340,11 @@ export function MappedExpensesPage({ entity, title, subtitle, totalLabel }: Prop
  <td><span className={`pill-tag tag-${r.group === 'Payroll' ? 'strong' : 'fuzzy'}`}>{r.group}</span></td>
  {r.values.map((v, i) => (<td key={i} className="num">{v ? formatCurrency(v) : '-'}</td>))}
  <td className="num"><strong>{formatCurrency(total)}</strong></td>
- {entity === 'Combined' && (
- <>
- <td className="num" style={{ background: '#f0faf3', color: '#1a6d3c', fontWeight: 600 }}>
- {purexTotal ? formatCurrency(purexTotal) : '-'}
- </td>
- <td className="num" style={{ background: '#fef9ef', color: '#945215', fontWeight: 600 }}>
- {moyshTotal ? formatCurrency(moyshTotal) : '-'}
- </td>
- </>
- )}
- <td className="num">{formatCurrency(avg)}</td>
- <td className="num">{formatCurrency(last3Avg(r.values))}</td>
- <td className="num">{formatCurrency(weeklyAvg(r.values))}</td>
+ <td className="num" style={{ background: '#f5f7ff' }}>{formatCurrency(Math.round(sumLast(r.values, 12)))}</td>
+ <td className="num" style={{ background: '#f5f7ff' }}>{formatCurrency(Math.round(sumLast(r.values, 6)))}</td>
+ <td className="num" style={{ background: '#f5f7ff' }}>{formatCurrency(Math.round(sumLast(r.values, 3)))}</td>
+ <td className="num">{formatCurrency(Math.round(avg))}</td>
+ <td className="num">{formatCurrency(Math.round(weeklyAvg(r.values)))}</td>
  </tr>
  {isExpanded && (
  <tr key={r.category + '-drill'}>

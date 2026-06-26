@@ -138,7 +138,18 @@ function flatten(reportRows: any[], monthCount: number): QbPlRow[] {
 
 export type AccountingMethod = 'Accrual' | 'Cash';
 
-export async function getQbPlReport(method: AccountingMethod = 'Accrual'): Promise<QbPlReport & { accountingMethod: AccountingMethod }> {
+// In-process cache per method. The P&L report is heavy (a full QB API call) and
+// is read by the 13-week, pnl-expenses, and the route - all within seconds of
+// each other and after every mapping edit. An 8-min TTL means one QB call serves
+// them all (also fewer token refreshes = steadier QB connection). force=true
+// rebuilds (used by ?refresh=1).
+type CachedPl = QbPlReport & { accountingMethod: AccountingMethod };
+const _plCache = new Map<AccountingMethod, { at: number; data: CachedPl }>();
+const PL_TTL_MS = 8 * 60 * 1000;
+
+export async function getQbPlReport(method: AccountingMethod = 'Accrual', force = false): Promise<CachedPl> {
+ const hit = _plCache.get(method);
+ if (!force && hit && Date.now() - hit.at < PL_TTL_MS) return hit.data;
  const tok = await getValidAccessToken();
  const { startDate, endDate, months, monthLabels } = buildMonths();
  const url = `${QBO_API_BASE}/v3/company/${tok.realmId}/reports/ProfitAndLoss`
@@ -147,7 +158,7 @@ export async function getQbPlReport(method: AccountingMethod = 'Accrual'): Promi
  const res = await qboFetch(url, tok.accessToken);
  const json = await res.json() as { Rows?: { Row: any[] }; Columns?: { Column: Array<{ ColTitle: string }> } };
  const rows = flatten(json.Rows?.Row ?? [], months.length);
- return {
+ const result: CachedPl = {
  asOf: new Date().toISOString(),
  realmId: tok.realmId,
  startDate,
@@ -157,4 +168,46 @@ export async function getQbPlReport(method: AccountingMethod = 'Accrual'): Promi
  rows,
  accountingMethod: method,
  };
+ _plCache.set(method, { at: Date.now(), data: result });
+ return result;
+}
+
+// Dedicated month-to-date P&L for ONE month. buildMonths() deliberately excludes
+// the current (incomplete) month so the run-rate stays on settled months; this
+// pulls just that month (start..min(month-end, today)) as a single column, same
+// shape as getQbPlReport so computePnlExpenses reads index 0. It lets the
+// variance ACTUAL show current-month QB spend AS IT SETTLES (no sheet), without
+// disturbing the global window or the budget run-rate. Cached per month+method.
+const _plMonthCache = new Map<string, { at: number; data: CachedPl }>();
+export async function getQbPlReportForMonth(ym: string, method: AccountingMethod = 'Cash', force = false): Promise<CachedPl> {
+ const key = `${ym}:${method}`;
+ const hit = _plMonthCache.get(key);
+ if (!force && hit && Date.now() - hit.at < PL_TTL_MS) return hit.data;
+ const tok = await getValidAccessToken();
+ const [y, m] = ym.split('-').map(Number);
+ const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+ const monthEnd = `${ym}-${String(lastDay).padStart(2, '0')}`;
+ const now = new Date();
+ const today = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`;
+ const startDate = `${ym}-01`;
+ const endDate = monthEnd < today ? monthEnd : today;   // month-to-date for the current month
+ const url = `${QBO_API_BASE}/v3/company/${tok.realmId}/reports/ProfitAndLoss`
+ + `?start_date=${startDate}&end_date=${endDate}`
+ + `&summarize_column_by=Month&accounting_method=${method}&minorversion=70`;
+ const res = await qboFetch(url, tok.accessToken);
+ const json = await res.json() as { Rows?: { Row: any[] } };
+ const rows = flatten(json.Rows?.Row ?? [], 1);
+ const monthLabel = new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+ const result: CachedPl = {
+ asOf: new Date().toISOString(),
+ realmId: tok.realmId,
+ startDate,
+ endDate,
+ months: [ym],
+ monthLabels: [monthLabel],
+ rows,
+ accountingMethod: method,
+ };
+ _plMonthCache.set(key, { at: Date.now(), data: result });
+ return result;
 }
