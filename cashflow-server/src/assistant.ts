@@ -563,16 +563,14 @@ const INTENTS: Intent[] = [
     id: 'greeting',
     phrases: ['hello', 'hey there', 'good morning', 'good evening', 'namaste', 'kaise ho', 'whats up', 'hi there'],
     keywords: ['hi', 'hey', 'hello', 'yo'],
-    handler: (s, _n, user) => {
+    handler: (_s, _n, user) => {
       const fn = firstName(user);
-      const role = (user?.title || '').toUpperCase();
-      const greet = fn ? `Hey ${fn}${role ? ` (${role})` : ''} - good to see you.` : `Hi - good to see you.`;
+      // Time of day in Little Tree's timezone (Michigan = US Eastern).
+      const hr = Number(new Date().toLocaleString('en-US', { timeZone: 'America/Detroit', hour: '2-digit', hour12: false }));
+      const partOfDay = hr < 12 ? 'morning' : hr < 17 ? 'afternoon' : 'evening';
       return {
-        title: greet,
-        lines: [
-          `Quick read on the business right now: you have ${money(s.cash.businessCash)} in the bank, and the 13-week plan stays ${s.runway.negativeWeekIdx != null ? 'tight' : 'cash-positive'} with about ${money(s.totals.closingCash[s.totals.closingCash.length - 1])} projected by week 13.`,
-          `Ask me anything - cash, runway, who owes us money, expenses, Gelato, or a what-if like "what happens if customers pay late".`,
-        ],
+        title: `Good ${partOfDay}${fn ? `, ${fn}` : ''}!`,
+        lines: [`Ask me anything about the cashflow - cash, runway, who to collect from, expenses, a what-if, or "show me on the dashboard".`],
       };
     },
   },
@@ -1072,6 +1070,50 @@ const INTENTS: Intent[] = [
       lines: [`That's the moment to be careful - try not to schedule any big payment right around then.`],
       note: SOURCE.closing,
     }),
+  },
+  {
+    id: 'expense_cut',
+    phrases: ['kahan kharcha kam', 'where to cut', 'cut costs', 'cut cost', 'reduce expenses', 'kharcha kam', 'save on expenses', 'reduce spending', 'cut expenses', 'where can i save', 'cost cutting', 'trim costs', 'kahan se kam', 'kaha kam karu', 'reduce cost', 'lower expenses'],
+    keywords: ['cut', 'reduce', 'trim'],
+    handler: (s) => {
+      const ranked = s.outflows
+        .map((l) => ({ label: l.label, t: l.values.reduce((a, b) => a + b, 0) }))
+        .filter((x) => x.t > 0).sort((a, b) => b.t - a.t);
+      const isDiscretionary = (lab: string) => /software|subscription|other|travel|meals|marketing/i.test(lab);
+      const disc = ranked.filter((x) => isDiscretionary(x.label));
+      const discTot = disc.reduce((a, b) => a + b.t, 0);
+      const lines = ranked.map((x) => `• ${x.label}: ${money(x.t)} over 13w${isDiscretionary(x.label) ? ' (discretionary - easiest to trim)' : ' (mostly fixed)'} - 10% off = ${money(x.t * 0.1)}`);
+      return {
+        title: `Where to cut - biggest levers first:`,
+        lines: [
+          ...lines,
+          `Quick win: a 15% trim on the discretionary lines (${disc.map((d) => d.label).join(', ') || 'Software, Other'}) frees about ${money(discTot * 0.15)} over 13 weeks - straight onto your closing cash.`,
+        ],
+        note: `Payroll, Inventory, COGS and Rent are mostly fixed; Software/Subscriptions, Other, Travel & Marketing are the easiest cuts. ${SOURCE.expenses}`,
+      };
+    },
+  },
+  {
+    id: 'cash_save',
+    phrases: ['cash kaise bachau', 'how to improve cash', 'improve cashflow', 'improve cash flow', 'save cash', 'cash badhau', 'how to save money', 'increase cash', 'runway badhau', 'extend runway', 'cash kaise badhe', 'protect cash', 'how do i save cash', 'kaise bachau', 'cash kaise badhau', 'strengthen cash'],
+    keywords: ['improve', 'extend', 'strengthen', 'bachau'],
+    handler: (s) => {
+      const overdue = s.collections.chase.filter((c) => (c.overdueBy ?? 0) > 5);
+      const overdueTot = overdue.reduce((t, c) => t + c.collectible, 0);
+      const disc = s.outflows.filter((l) => /software|subscription|other|travel|meals|marketing/i.test(l.label)).reduce((t, l) => t + l.values.reduce((a, b) => a + b, 0), 0);
+      const lines = [
+        `1. Collect: ${money(overdueTot)} is overdue from ${overdue.length} customer${overdue.length === 1 ? '' : 's'} past their usual pay timing - the fastest cash. Ask "who to collect from" for the call list.`,
+        `2. Trim: discretionary spend (Software, Other, Travel, Marketing) is ${money(disc)} over 13 weeks - a 15% cut frees ${money(disc * 0.15)}.`,
+        `3. Time it: tightest week is ${weekName(s, s.runway.minClosingIdx)} at ${money(s.runway.minClosing)} - avoid big payments right around then.`,
+      ];
+      if (s.runway.negativeWeekIdx != null) lines.push(`⚠ Cash dips negative around ${weekName(s, s.runway.negativeWeekIdx)} - the collections in step 1 are what keep you out of the red.`);
+      else lines.push(`Cash stays positive throughout if those collections land on time.`);
+      return {
+        title: `Here's how to strengthen cash over the next 13 weeks:`,
+        lines,
+        note: `Built live from your collections, expenses and weekly closing-cash numbers.`,
+      };
+    },
   },
   {
     id: 'status',

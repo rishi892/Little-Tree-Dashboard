@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { askCopilot, fetchCopilotChanges } from '../api';
+import { askCopilot } from '../api';
 import { cfoNavigate } from '../cfoNav';
-
-const LAST_SEEN_KEY = 'cfo_last_seen';
 
 type NavTarget = { view: string; tab: string; anchor: string; where: string };
 
@@ -95,29 +93,9 @@ export function CfoCopilot() {
     return () => { clearTimeout(stop); clearInterval(iv); };
   }, [open]);
 
-  // The bot checks for itself what changed since you last looked, then greets
-  // you with it the first time you open the panel - you never tell it anything
-  // updated. The `alive` cleanup keeps this correct under React StrictMode's
-  // double-mount (the first fetch is discarded, the live one wins).
-  const [pendingChanges, setPendingChanges] = useState<{ title: string; lines: string[]; note?: string } | null>(null);
-  const [changesShown, setChangesShown] = useState(false);
-  useEffect(() => {
-    let alive = true;
-    let since: string | undefined;
-    try { since = localStorage.getItem(LAST_SEEN_KEY) || undefined; } catch { /* ignore */ }
-    fetchCopilotChanges(since)
-      .then((res) => { if (alive && res && /what changed/i.test(res.title) && res.lines.length > 0) setPendingChanges(res); })
-      .catch(() => { /* silent - proactive only */ });
-    return () => { alive = false; };
-  }, []);
-
-  useEffect(() => {
-    if (open && pendingChanges && !changesShown) {
-      setChangesShown(true);
-      setMsgs((m) => [...m, { role: 'bot', title: pendingChanges.title, lines: pendingChanges.lines, note: pendingChanges.note }]);
-      try { localStorage.setItem(LAST_SEEN_KEY, new Date().toISOString()); } catch { /* ignore */ }
-    }
-  }, [open, pendingChanges, changesShown]);
+  // Greeting only - no proactive "what changed" on open. The user gets the
+  // time-of-day hello and asks whatever they want; "what changed" is available
+  // on demand (just ask), not pushed.
 
   async function send(q: string) {
     const question = q.trim();
