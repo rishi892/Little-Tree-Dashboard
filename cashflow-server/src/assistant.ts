@@ -15,6 +15,7 @@ import { getGelatoAr, type GelatoArResult } from './gelatoAr.js';
 import { getTillerBalances, type TillerBalances } from './tiller.js';
 import { getPurexClearing, type PurexClearingResult } from './purexClearing.js';
 import { getLinkedBalances, type LinkedBalances } from './linkedAccounts.js';
+import { getSameWeekCollectionRate, getCollectionLagCurve } from './snapshotActuals.js';
 import { recordHistory, getChanges } from './assistantHistory.js';
 import { dbInsert } from './db.js';
 import fs from 'node:fs';
@@ -79,6 +80,8 @@ export type FinancialSnapshot = {
       invoices: number;
     }[];
   };
+  // Inputs for live what-if maths (e.g. "if sales rise 20%, weekly collection?").
+  scenarioData: { salesWeekly: number[]; sameWeekRate: number; lagCurve: number[] };
   intercompany: { purexClearing: number | null; dueFromPurex: number | null };
   burn: { weekly: number; monthly: number };
   health: { qbDown: boolean; warnings: string[] };
@@ -100,12 +103,14 @@ const SNAP_TTL_MS = 30 * 1000;
 export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
   if (!force && snapCache && Date.now() - snapCache.at < SNAP_TTL_MS) return snapCache.snap;
 
-  const [cf, gel, till, purex, linked] = await Promise.all([
+  const [cf, gel, till, purex, linked, sameWeekRate, lagCurve] = await Promise.all([
     getCashflow13Week(),
     getGelatoAr().catch(() => null as GelatoArResult | null),
     getTillerBalances().catch(() => null as TillerBalances | null),
     getPurexClearing().catch(() => null as PurexClearingResult | null),
     getLinkedBalances().catch(() => null as LinkedBalances | null),
+    getSameWeekCollectionRate().catch(() => 0.13),
+    getCollectionLagCurve().catch(() => []),
   ]);
 
   const closing = cf.totals.closingCash;
@@ -215,6 +220,11 @@ export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
       topCustomers,
     },
     collections: { aging, chase },
+    scenarioData: {
+      salesWeekly: (cf.inflows.find((l) => /sales.*forecast/i.test(l.label))?.values ?? cf.weeks.map(() => 0)),
+      sameWeekRate: typeof sameWeekRate === 'number' && sameWeekRate > 0 ? sameWeekRate : 0.13,
+      lagCurve: Array.isArray(lagCurve) && lagCurve.length > 0 ? lagCurve : [],
+    },
     intercompany: {
       purexClearing: purex ? purex.clearing : null,
       dueFromPurex: (linked?.qb.intercompanyExcluded ?? []).find((a) => /due from purex|gelato net ?90/i.test(a.name))?.balance ?? null,
@@ -987,8 +997,49 @@ const INTENTS: Intent[] = [
     },
   },
   {
+    id: 'sales_scenario',
+    phrases: ['if sales', 'agar sales', 'sales badhao', 'sales badhe', 'sales badh', 'increase sales', 'sales double', 'sales dugna', 'sales up', 'sales grow', 'more sales', 'sales drop', 'sales fall', 'sales gir', 'sales kam', 'sales se collection', 'collection if sales', 'weekly collection if sales', 'sales badhne'],
+    keywords: ['sales'],
+    handler: (s, n) => {
+      let shock = extractScenario(n);
+      if (shock == null && /\b(double|dugna|twice|2x)\b/.test(n)) shock = 100;
+      if (shock == null && /\b(half|aadha|2x down)\b/.test(n)) shock = -50;
+      if (shock == null) {
+        return { title: `By how much should sales change?`, lines: [`E.g. "if sales go up 20%" or "if sales double" - I'll show how much extra actually COLLECTS in each week and how cash moves. (~${pct(s.scenarioData.sameWeekRate)} of each week's sales lands the same week, the rest collects over the following weeks.)`] };
+      }
+      const sd = s.scenarioData;
+      const factor = shock / 100;
+      const delta = sd.salesWeekly.map((v) => v * factor);
+      const rate = sd.sameWeekRate;
+      const tail = sd.lagCurve.length > 1 ? sd.lagCurve.slice(1) : [1];
+      const tsum = tail.reduce((a, b) => a + b, 0) || 1;
+      const lagged = tail.map((v) => v / tsum);
+      const W = s.weeks.length;
+      const collDelta = new Array(W).fill(0);
+      for (let w = 0; w < W; w++) {
+        collDelta[w] += (delta[w] ?? 0) * rate;
+        for (let j = 0; j < lagged.length && w + 1 + j < W; j++) collDelta[w + 1 + j] += (delta[w] ?? 0) * (1 - rate) * lagged[j];
+      }
+      const newClosing = rollClosing(s, s.totals.inflows.map((v, i) => v + collDelta[i]));
+      const extra13 = collDelta.reduce((a, b) => a + b, 0);
+      const salesDelta13 = delta.reduce((a, b) => a + b, 0);
+      const baseTail = s.totals.closingCash[s.totals.closingCash.length - 1];
+      const newTail = newClosing[newClosing.length - 1];
+      const dir = shock > 0 ? 'up' : 'down', more = shock > 0 ? 'more' : 'less';
+      return {
+        title: `If sales go ${dir} ${Math.abs(shock)}% (${money(Math.abs(salesDelta13))} over 13 weeks), about ${money(Math.abs(extra13))} ${more} actually collects in:`,
+        lines: [
+          `Extra collection by week: ${collDelta.slice(0, 8).map((v, i) => `Wk${i + 1} ${money(v)}`).join(' · ')} …`,
+          `Why: ~${pct(rate)} of each week's sales lands the SAME week; the other ~${pct(1 - rate)} collects over the following weeks (your real lag curve).`,
+          `Week-13 cash would be ${money(newTail)} vs ${money(baseTail)} now - a change of ${money(newTail - baseTail)}.`,
+        ],
+        note: `Live maths on your own same-week rate (${pct(rate)}) + collection lag curve - same model the 13-week uses.`,
+      };
+    },
+  },
+  {
     id: 'scenario',
-    phrases: ['what if', 'agar', 'scenario', 'sales drop', 'sales fall', 'if sales', 'suppose', 'maan lo', 'sales gir'],
+    phrases: ['what if', 'agar', 'scenario', 'collections drop', 'collections lower', 'if collections', 'suppose', 'maan lo', 'collections gir'],
     keywords: ['whatif', 'agar', 'suppose', 'scenario'],
     handler: (s, n) => {
       const shock = extractScenario(n);
