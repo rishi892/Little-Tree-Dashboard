@@ -2109,6 +2109,58 @@ export async function saveCashflowEdits(set: Record<string, number>, clear: stri
  return data;
 }
 
+// Per-PAYEE edits - breakdown-level overrides behind an outflow line on the
+// Expense Edit page. Key: `${line}::${payee}|${weekStart}`. Same shape as the
+// line-level cashflow edits.
+export type PayeeEdits = Record<string, CellEdit>;
+
+export async function fetchPayeeEdits(): Promise<PayeeEdits> {
+ const res = await fetch('/api/cashflow-payee-edits');
+ if (!res.ok) throw new Error(`Failed to load payee edits: ${res.status}`);
+ return res.json();
+}
+
+export async function savePayeeEdits(set: Record<string, number>, clear: string[] = [], reasons: Record<string, string> = {}): Promise<PayeeEdits> {
+ const res = await fetch('/api/cashflow-payee-edits', {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({ set, clear, by: currentUserName(), reasons }),
+ });
+ if (!res.ok) throw new Error(`Failed to save payee edits: ${res.status}`);
+ const data = await res.json();
+ try { window.dispatchEvent(new Event('cashflow-edits-changed')); } catch { /* SSR */ }
+ return data;
+}
+
+// Manual expense heads - owner-added payees on a line (name + details). Per-week
+// amounts go through savePayeeEdits like any other payee.
+export type ManualHead = { name: string; details: string; by: string; at: string };
+export type ManualHeads = Record<string, ManualHead[]>;
+
+export async function fetchManualHeads(): Promise<ManualHeads> {
+ const res = await fetch('/api/cashflow-manual-heads');
+ if (!res.ok) throw new Error(`Failed to load manual heads: ${res.status}`);
+ return res.json();
+}
+
+export async function saveManualHead(line: string, name: string, details: string): Promise<ManualHeads> {
+ const res = await fetch('/api/cashflow-manual-heads', {
+ method: 'POST', headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({ line, name, details, by: currentUserName() }),
+ });
+ if (!res.ok) throw new Error(`Failed to add head: ${res.status}`);
+ return res.json();
+}
+
+export async function removeManualHead(line: string, name: string): Promise<ManualHeads> {
+ const res = await fetch('/api/cashflow-manual-heads', {
+ method: 'POST', headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({ line, name, remove: true, by: currentUserName() }),
+ });
+ if (!res.ok) throw new Error(`Failed to remove head: ${res.status}`);
+ return res.json();
+}
+
 // Sales + AR forecast overrides (Sales → Edit tab). Per-week amounts keyed by
 // week-start (YYYY-MM-DD). Display-only; does not affect the cashflow.
 export type ForecastOverrides = { sales: Record<string, number>; ar: Record<string, number> };

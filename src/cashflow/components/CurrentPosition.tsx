@@ -11,7 +11,7 @@ import {
 } from '../api';
 import { formatCurrency } from '../format';
 
-const POLL_INTERVAL_MS = 15_000;
+const POLL_INTERVAL_MS = 60_000;
 
 /**
  * User-confirmed cash mappings - pairs the QB account with its Tiller twin.

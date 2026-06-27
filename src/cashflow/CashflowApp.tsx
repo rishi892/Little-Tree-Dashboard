@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { disconnect, fetchDashboard, fetchStatus, fetchCashflow13, fetchMappedExpenses, type DashboardData, type Cashflow13, type Status } from './api';
-import { formatCurrency, formatMonths, formatSigned } from './format';
+import { formatCurrency, formatMonths } from './format';
 import { KpiCard, type KpiBreakdownRow } from './components/KpiCard';
 import { Projection13WeekChart } from './components/Projection13WeekChart';
 import { Sidebar } from './components/Sidebar';
@@ -310,31 +310,14 @@ function DashboardView({
  breakdown={toBreakdownRows(data.cashBreakdown, 'Total cash on hand', data.currentCash)}
  />
  <KpiCard
- label="Net cash last month"
- period={data.netCashThisMonthLabel ?? 'Most recent month'}
- value={formatCurrency(data.netCashThisMonth)}
- sub={`${data.netCashLastMonthLabel ?? 'Prior'}: ${formatCurrency(data.netCashLastMonth)}`}
- trend={data.netCashThisMonth >= 0 ? 'up' : 'down'}
- active={activeKpi === 1}
- open={openKpi === 1}
- onClick={() => selectKpi(1)}
- onClose={() => setOpenKpi(null)}
- info={{ formula: 'Month-end bank balance − prior month-end (Tiller delta)' }}
- breakdown={[
- { label: data.netCashThisMonthLabel ?? 'This month', value: formatSigned(data.netCashThisMonth), strong: true },
- { label: data.netCashLastMonthLabel ?? 'Prior month', value: formatSigned(data.netCashLastMonth) },
- { label: 'Month-over-month change', value: formatSigned(data.monthOverMonthChange) },
- ]}
- />
- <KpiCard
  label="Monthly Burn"
  period="Avg total opex"
  value={formatCurrency(data.avgMonthlyBurn)}
  sub="Inv + Payroll + Subs + Other (live)"
  trend="down"
- active={activeKpi === 2}
- open={openKpi === 2}
- onClick={() => selectKpi(2)}
+ active={activeKpi === 1}
+ open={openKpi === 1}
+ onClick={() => selectKpi(1)}
  onClose={() => setOpenKpi(null)}
  info={{ formula: 'Inventory + Payroll + Subscriptions + Other (avg / month)' }}
  breakdown={toBreakdownRows(data.burnBreakdown, 'Total monthly burn', data.avgMonthlyBurn)}
@@ -372,9 +355,9 @@ function DashboardView({
  : 'No burn data'
  }
  trend={data.runwayMonths === null ? 'up' : data.runwayMonths < 1 ? 'down' : 'up'}
- active={activeKpi === 3}
- open={openKpi === 3}
- onClick={() => selectKpi(3)}
+ active={activeKpi === 2}
+ open={openKpi === 2}
+ onClick={() => selectKpi(2)}
  onClose={() => setOpenKpi(null)}
  info={{ formula: 'Cash on hand ÷ Monthly Burn' }}
  breakdown={[

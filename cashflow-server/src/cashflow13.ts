@@ -34,6 +34,7 @@ import { computePnlExpenses } from './pnlExpenses.js';
 import { getQbPlReport } from './qbPlReport.js';
 import { loadOverrides } from './categoryOverrides.js';
 import { getInventoryPurchases } from './inventoryPurchases.js';
+import { getVendorBreakdownForAccounts } from './categoryVendors.js';
 import { getCcPaymentSchedule, type CcScheduledPayment } from './ccSchedule.js';
 import { getSalesForecast, type SalesForecastResult } from './salesForecast.js';
 import { captureSnapshotIfNeeded, getSnapshot, type WeeklySnapshot } from './weeklySnapshots.js';
@@ -577,10 +578,20 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  invMonthlyAvg += monthly;
  pushExploded(invItems);
  } else if (/software\s*&\s*subscriptions/i.test(cat)) {
- // Software & Subscriptions comes from the SAME Combined expense source as
- // every other category (per request) - not a separate subscription audit.
  subsMonthlyAvg += monthly;
+ // Break Software into the actual VENDORS inside its QB accounts (HubSpot,
+ // Notion, Slack, ...) instead of the bare account names, so the breakdown
+ // shows "which subscription is how much". Vendor weights are scaled to the
+ // category run-rate, so the breakdown still reconciles to the line and never
+ // double-counts spend booked under a different head (e.g. Gusto in Payroll).
+ let subVendors: { label: string; monthly: number }[] = [];
+ try { subVendors = await getVendorBreakdownForAccounts(srcs.map((s) => s.name)); } catch { /* fall back below */ }
+ if (subVendors.length > 0) {
+ const vtot = subVendors.reduce((s, v) => s + v.monthly, 0) || 1;
+ for (const v of subVendors) subsItems.push({ label: v.label, monthly: monthly * (v.monthly / vtot) });
+ } else {
  pushExploded(subsItems);
+ }
  } else if (/rent|building lease/i.test(cat)) {
  // Rent is its own outflow head: a fixed monthly lump paid on the 1st.
  rentMonthly += monthly;
@@ -766,8 +777,11 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
 
  // Little Tree AR row = existing open-invoice collections + the lagged share of
  // new sales that ages into AR (both collecting customer-wise).
+ // Show the LIVE open-AR total (= the AR dashboard's "Total Outstanding"), not a
+ // hardcoded figure - the projection now collects exactly these invoices.
+ const arOpenStr = arProjection?.openTotal ? '$' + Math.round(arProjection.openTotal).toLocaleString('en-US') : 'open';
  const pastArBreakdown: CashflowBreakdownItem[] = [
- { label: 'Existing open invoices (today’s $567k AR)', amount: +openArCollections13w.toFixed(2), sub: 'collecting customer-wise by paid-history timing' },
+ { label: `Existing open invoices (today's ${arOpenStr} AR)`, amount: +openArCollections13w.toFixed(2), sub: 'collecting customer-wise by paid-history timing' },
  { label: 'New sales that aged into AR', amount: +laggedNewSales13w.toFixed(2), sub: `the ${100 - +sameWeekPct}% of new sales collecting after the sale week` },
  ].filter((x) => x.amount > 0.5);
 
@@ -791,7 +805,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  {
  label: 'Past AR Collections (lag-curve)',
  source: nonGelatoArSource,
- note: `Money owed collecting week-by-week. Existing open AR ($567k, every invoice) spread by EACH customer's own pay history (median days-to-pay), PLUS the ~${100 - +sameWeekPct}% of new sales that ages into AR. This IS your receivable coming in.`,
+ note: `Money owed collecting week-by-week. Existing open AR (${arOpenStr}, every invoice from the AR dashboard) spread by EACH customer's own pay history (median days-to-pay), PLUS the ~${100 - +sameWeekPct}% of new sales that ages into AR. This IS your receivable coming in.`,
  values: nonGelatoArCollections,
  breakdown: pastArBreakdown,
  },

@@ -101,6 +101,7 @@ export type ArProjectionResult = {
  globalAvgCollectionDays: number; // legacy field kept for UI compatibility
  dailyRunRate: number;
  projectedCollectibilityRate: number; // blended haircut: $ booked as cash ÷ gross open AR projected
+ openTotal: number; // gross open AR base projected from (= AR dashboard "Total Outstanding")
  warnings: string[];
 };
 
@@ -173,7 +174,7 @@ export async function getArProjection(weeks: Week[], asOf?: Date): Promise<ArPro
  return {
  arByWeek, buckets, channelStats: [], globalCurve: [], globalCollectionRate: 0,
  placements: [], globalAvgCollectionDays: 30, dailyRunRate: 0,
- projectedCollectibilityRate: 1, warnings,
+ projectedCollectibilityRate: 1, openTotal: 0, warnings,
  };
  }
 
@@ -188,7 +189,7 @@ export async function getArProjection(weeks: Week[], asOf?: Date): Promise<ArPro
  return {
  arByWeek, buckets, channelStats: [], globalCurve: [], globalCollectionRate: 0,
  placements: [], globalAvgCollectionDays: 30, dailyRunRate: 0,
- projectedCollectibilityRate: 1, warnings,
+ projectedCollectibilityRate: 1, openTotal: 0, warnings,
  };
  }
 
@@ -362,14 +363,36 @@ export async function getArProjection(weeks: Week[], asOf?: Date): Promise<ArPro
    return -1;
  }
 
- for (const inv of tracker.invoices) {
+ // OPEN-AR BASE: the FORWARD projection collects the AR DASHBOARD's open
+ // invoices (the same "Total Outstanding" the user sees, e.g. $556,687) so the
+ // 13-week existing-AR matches the dashboard exactly and computes from it. The
+ // as-of backtest keeps the Invoice Tracker (it needs paidDate to rewind). The
+ // pay-day TIMING still comes from the tracker's paid history (payDayStats).
+ const usingDash = !asOf;
+ type OpenInv = { invoiceNumber: string; openBalance: number; status: string; customer: string; invoiceDate: Date; amount: number; paid: number };
+ let openSource: OpenInv[] = tracker.invoices;
+ if (usingDash) {
+ try {
+ const { getLittleTreeOpenAr } = await import('./arDashboardOpen.js');
+ const dash = await getLittleTreeOpenAr();
+ openSource = dash.invoices.map((iv) => ({
+ invoiceNumber: iv.invoiceNumber, openBalance: iv.amount, status: iv.status, customer: iv.customer,
+ invoiceDate: parseMDY(iv.issueDate) ?? todayUtc, amount: iv.amount, paid: 0,
+ }));
+ } catch (e) {
+ warnings.push(`AR dashboard open fetch failed (${e instanceof Error ? e.message : '?'}) - using Invoice Tracker base.`);
+ openSource = tracker.invoices;
+ }
+ }
+
+ for (const inv of openSource) {
  const open = inv.openBalance;   // = "Money Owed" (AR dashboard source of truth)
  if (open <= 0.01) continue;
  if (/write\s*off/i.test(inv.status)) continue;
  const channel = channelOf(inv.customer);
  if (channel === 'Gelato') continue; // Gelato handled separately (Net 97)
- if (open < 200) continue; // sub-$200 noise filter - NON-GELATO only
- if (inv.invoiceDate < stale) continue;
+ if (!usingDash && open < 200) continue; // sub-$200 noise filter (tracker source only)
+ if (!usingDash && inv.invoiceDate < stale) continue; // stale skip (tracker source only)
 
  const currentLag = monthLag(inv.invoiceDate, todayUtc);
 
@@ -485,6 +508,7 @@ export async function getArProjection(weeks: Week[], asOf?: Date): Promise<ArPro
  globalAvgCollectionDays: +globalAvgDays.toFixed(1),
  dailyRunRate: 0,
  projectedCollectibilityRate: grossOpenProjected > 0 ? +(netOpenProjected / grossOpenProjected).toFixed(4) : 1,
+ openTotal: +grossOpenProjected.toFixed(2),
  warnings,
  };
 }

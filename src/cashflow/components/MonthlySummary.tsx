@@ -2,14 +2,50 @@ import { useEffect, useState } from 'react';
 import {
  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from 'recharts';
-import { fetchMonthlyOpex, type MonthlyOpexResult } from '../api';
+import { fetchMonthlyOpex, fetchMappedExpenses, type MonthlyOpexResult, type MappedExpensesResult } from '../api';
 import { formatCurrency } from '../format';
 import { CollapsibleSection } from './CollapsibleSection';
 
 const POLL_INTERVAL_MS = 30_000;
 
+// Expense heads + colours - SAME palette as the 13-Week cashflow chart, so the
+// colour-coding means the same thing across the app.
+const OPEX_HEADS: { key: string; color: string; rx: RegExp | null }[] = [
+ { key: 'Payroll', color: '#dc2626', rx: /^payroll/i },
+ { key: 'Inventory & Raw Materials', color: '#16a34a', rx: /inventory & raw materials/i },
+ { key: 'COGS', color: '#f59e0b', rx: /^cogs\b/i },
+ { key: 'Rent', color: '#0891b2', rx: /rent|building lease/i },
+ { key: 'Software & Subscriptions', color: '#8b5cf6', rx: /software & subscriptions/i },
+ { key: 'Other Expenses', color: '#64748b', rx: null }, // catch-all
+];
+function headFor(category: string): string {
+ for (const h of OPEX_HEADS) if (h.rx && h.rx.test(category)) return h.key;
+ return 'Other Expenses';
+}
+
+/** Tooltip that shows ONLY the segment the cursor is on (not the whole stack). */
+function oneSegTip(activeKey: string | null) {
+ return ({ active, payload, label }: { active?: boolean; payload?: Array<Record<string, unknown>>; label?: string }) => {
+ if (!active || !payload || payload.length === 0) return null;
+ const item = (activeKey ? payload.find((p) => p.dataKey === activeKey) : null) ?? payload[payload.length - 1];
+ if (!item) return null;
+ const color = (item.color ?? item.fill ?? item.stroke) as string | undefined;
+ return (
+ <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px', fontSize: 13 }}>
+ <div style={{ color: 'var(--muted)', marginBottom: 4 }}>{label}</div>
+ <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+ <span style={{ width: 10, height: 10, borderRadius: 2, background: color, display: 'inline-block' }} />
+ <span>{String(item.name)}: <strong>{formatCurrency(Number(item.value))}</strong></span>
+ </div>
+ </div>
+ );
+ };
+}
+
 export function MonthlySummary() {
  const [data, setData] = useState<MonthlyOpexResult | null>(null);
+ const [mapped, setMapped] = useState<MappedExpensesResult | null>(null);
+ const [activeKey, setActiveKey] = useState<string | null>(null);
  const [loading, setLoading] = useState(true);
  const [error, setError] = useState<string | null>(null);
 
@@ -17,7 +53,12 @@ export function MonthlySummary() {
  if (!silent) setLoading(true);
  if (!silent) setError(null);
  try {
- setData(await fetchMonthlyOpex({ refresh }));
+ const [opex, me] = await Promise.all([
+ fetchMonthlyOpex({ refresh }),
+ fetchMappedExpenses('Combined').catch(() => null),
+ ]);
+ setData(opex);
+ if (me) setMapped(me);
  } catch (e) {
  if (!silent) setError(e instanceof Error ? e.message : 'Failed');
  } finally {
@@ -63,11 +104,17 @@ export function MonthlySummary() {
  const periodStart = rows[0]?.monthLabel ?? '-';
  const periodEnd = rows[rows.length - 1]?.monthLabel ?? '-';
 
- const chartData = rows.map((r) => ({
- month: r.monthLabel,
- LT: r.ltDirect,
- PureX: r.purex,
- }));
+ // Category-stacked chart data: group the mapped expense categories into the
+ // same OpEx heads (and colours) the 13-Week cashflow uses, per month.
+ const catChart = (mapped?.monthLabels ?? []).map((label, i) => {
+ const row: Record<string, number | string> = { month: label };
+ for (const h of OPEX_HEADS) row[h.key] = 0;
+ for (const r of (mapped?.rows ?? [])) {
+ const head = headFor(r.category);
+ row[head] = (row[head] as number) + Math.max(0, r.values[i] ?? 0);
+ }
+ return row;
+ });
 
  return (
  <>
@@ -82,6 +129,32 @@ export function MonthlySummary() {
  {loading ? 'Refreshing…' : 'Refresh'}
  </button>
  </div>
+
+ {/* Visual chart - category-coloured (same palette as the 13-Week cashflow), on top. */}
+ <CollapsibleSection
+ defaultOpen
+ title="Visual: Monthly OpEx by category"
+ sub="Stacked by expense head, same colours as the 13-Week cashflow. Hover a bar to see the head + amount."
+ >
+ {catChart.length === 0 ? (
+ <div style={{ padding: 18, color: 'var(--muted)' }}>Loading category breakdown…</div>
+ ) : (
+ <div style={{ width: '100%', height: 360, padding: '0 12px 16px' }}>
+ <ResponsiveContainer>
+ <BarChart data={catChart} margin={{ top: 12, right: 12, left: 0, bottom: 8 }}>
+ <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+ <XAxis dataKey="month" stroke="var(--muted)" style={{ fontSize: 11 }} />
+ <YAxis stroke="var(--muted)" style={{ fontSize: 11 }} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
+ <Tooltip cursor={{ fill: 'transparent' }} content={oneSegTip(activeKey)} />
+ <Legend />
+ {OPEX_HEADS.map((h) => (
+ <Bar key={h.key} dataKey={h.key} stackId="opex" fill={h.color} maxBarSize={40} onMouseEnter={() => setActiveKey(h.key)} />
+ ))}
+ </BarChart>
+ </ResponsiveContainer>
+ </div>
+ )}
+ </CollapsibleSection>
 
  {/* Monthly detail table */}
  <div className="section">
@@ -139,28 +212,6 @@ export function MonthlySummary() {
  </div>
  </div>
 
- {/* Visual chart - collapsed by default */}
- <CollapsibleSection
- title="Visual: Monthly LT vs PureX OpEx"
- sub="Stacked bars - LT-direct (blue) vs PureX-paid (orange)."
- >
- <div style={{ width: '100%', height: 360, padding: '0 12px 16px' }}>
- <ResponsiveContainer>
- <BarChart data={chartData} margin={{ top: 12, right: 12, left: 0, bottom: 8 }}>
- <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
- <XAxis dataKey="month" stroke="var(--muted)" style={{ fontSize: 11 }} />
- <YAxis stroke="var(--muted)" style={{ fontSize: 11 }} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
- <Tooltip
- formatter={(v: number) => formatCurrency(v)}
- contentStyle={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 6 }}
- />
- <Legend />
- <Bar dataKey="LT" stackId="opex" fill="var(--info)" />
- <Bar dataKey="PureX" stackId="opex" fill="var(--warn)" />
- </BarChart>
- </ResponsiveContainer>
- </div>
- </CollapsibleSection>
  </>
  );
 }

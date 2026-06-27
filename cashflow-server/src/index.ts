@@ -430,14 +430,20 @@ app.get('/api/cron/prewarm', async (req, res) => {
  return;
  }
  const t0 = Date.now();
- // QB first (refreshes the token + warms the heavy QB caches sequentially to
- // avoid throttle), then sheets (reuse the now-fresh token). Each step is
- // best-effort: one upstream failing never aborts the rest.
+ // 0. Keep the QB connection ALIVE: refresh the access token up front (one
+ //    coalesced refresh) so the token chain never lapses - this is what keeps
+ //    QuickBooks "always connected" even on idle days. Does the refresh ONCE so
+ //    the warms below reuse it (no concurrent-refresh that could revoke it).
+ let token = 'ok';
+ try { const { getValidAccessToken } = await import('./oauth.js'); await getValidAccessToken(); }
+ catch (e) { token = String(e instanceof Error ? e.message : e); }
+ // QB first (warms the heavy QB caches sequentially to avoid throttle), then
+ // sheets. Each step is best-effort: one upstream failing never aborts the rest.
  const qb = await prewarmQbCaches().then(() => 'ok').catch((e) => String(e instanceof Error ? e.message : e));
  const sheets = await prewarmSheetCaches().then(() => 'ok').catch((e) => String(e instanceof Error ? e.message : e));
  const seconds = Number(((Date.now() - t0) / 1000).toFixed(1));
- console.log(`[cron/prewarm] done in ${seconds}s (qb=${qb}, sheets=${sheets})`);
- res.json({ ok: true, seconds, qb, sheets });
+ console.log(`[cron/prewarm] done in ${seconds}s (token=${token}, qb=${qb}, sheets=${sheets})`);
+ res.json({ ok: true, seconds, token, qb, sheets });
 });
 
 // Background watcher: refresh the snapshot every 30 min even with no user
@@ -642,6 +648,54 @@ app.post('/api/cashflow-edits', async (req, res, next) => {
  const reasons: Record<string, string> = {};
  for (const [k, v] of Object.entries(body.reasons ?? {})) { if (k && typeof v === 'string') reasons[k] = v; }
  res.json(await applyCashflowEdits(set, clear, by, reasons));
+ } catch (err) { next(err); }
+});
+
+// Per-PAYEE cashflow edits - the breakdown-level overrides behind each outflow
+// line on the Expense Edit page (key: `${line}::${payee}|${weekStart}`). The
+// line-level roll-up is still written to /api/cashflow-edits by the UI, so the
+// 13-Week grid + dashboard reflect it without the engine knowing about payees.
+app.get('/api/cashflow-payee-edits', async (_req, res, next) => {
+ try {
+ const { loadPayeeEdits } = await import('./cashflowPayeeEdits.js');
+ res.json(await loadPayeeEdits());
+ } catch (err) { next(err); }
+});
+
+app.post('/api/cashflow-payee-edits', async (req, res, next) => {
+ try {
+ const { applyPayeeEdits } = await import('./cashflowPayeeEdits.js');
+ const body = (req.body ?? {}) as { set?: Record<string, unknown>; clear?: unknown[]; by?: unknown; reasons?: Record<string, unknown> };
+ const set: Record<string, number> = {};
+ for (const [k, v] of Object.entries(body.set ?? {})) { const n = Number(v); if (k && Number.isFinite(n)) set[k] = n; }
+ const clear = Array.isArray(body.clear) ? body.clear.filter((k): k is string => typeof k === 'string') : [];
+ const by = typeof body.by === 'string' ? body.by : 'Unknown';
+ const reasons: Record<string, string> = {};
+ for (const [k, v] of Object.entries(body.reasons ?? {})) { if (k && typeof v === 'string') reasons[k] = v; }
+ res.json(await applyPayeeEdits(set, clear, by, reasons));
+ } catch (err) { next(err); }
+});
+
+// Manual expense HEADS - payees the owner adds on the Expense Edit page that are
+// not in the QB breakdown (name + details). Their per-week amounts live in the
+// payee-edit store above and roll up into the line total.
+app.get('/api/cashflow-manual-heads', async (_req, res, next) => {
+ try {
+ const { loadManualHeads } = await import('./cashflowManualHeads.js');
+ res.json(await loadManualHeads());
+ } catch (err) { next(err); }
+});
+
+app.post('/api/cashflow-manual-heads', async (req, res, next) => {
+ try {
+ const { addManualHead, removeManualHead } = await import('./cashflowManualHeads.js');
+ const body = (req.body ?? {}) as { line?: unknown; name?: unknown; details?: unknown; by?: unknown; remove?: unknown };
+ const line = typeof body.line === 'string' ? body.line : '';
+ const name = typeof body.name === 'string' ? body.name : '';
+ const details = typeof body.details === 'string' ? body.details : '';
+ const by = typeof body.by === 'string' ? body.by : 'Unknown';
+ if (!line || !name) { res.status(400).json({ error: 'line and name required' }); return; }
+ res.json(body.remove === true ? await removeManualHead(line, name) : await addManualHead(line, name, details, by));
  } catch (err) { next(err); }
 });
 

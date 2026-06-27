@@ -3,7 +3,6 @@ import { onCfoNav } from '../cfoNav';
 import { SalesForecastPage } from './SalesForecastPage';
 import { ArProjectionPage } from './ArProjectionPage';
 import { WeeklyRowEdit } from './WeeklyRowEdit';
-import { MonthlyForecastEdit } from './MonthlyForecastEdit';
 import { ExpenseEditPage } from './ExpenseEditPage';
 
 // "Projections" section: Sales (forecast + editable weekly sales), AR (how AR
@@ -46,7 +45,6 @@ export function SalesHub() {
         {tab === 'sales' && (
           <>
             <SalesForecastPage />
-            <MonthlyForecastEdit />
             <WeeklyRowEdit rowRx={/^sales \(this week/i} heading="Edit weekly sales" sub="Gross sales that feed the 13-Week cashflow" />
           </>
         )}

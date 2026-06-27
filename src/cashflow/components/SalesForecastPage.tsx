@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react';
+import {
+ ResponsiveContainer, ComposedChart, Bar, Line, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine,
+} from 'recharts';
 import { fetchSalesForecast, fetchSalesWeekInvoices, type SalesForecastResult, type SalesForecastBrand, type SalesWeekInvoicesResponse, type SalesBucket } from '../api';
 import { formatCurrency, formatSigned } from '../format';
+import { CollapsibleSection } from './CollapsibleSection';
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const YEAR_COLORS = ['#94a3b8', '#2563eb', '#059669', '#f59e0b', '#8b5cf6']; // older → newer
 
 const BUCKET_ORDER: Array<{ key: SalesBucket; short: string; hint: string }> = [
  { key: 'wholesale',    short: 'Little Tree',   hint: 'Little Tree retail sales' },
@@ -84,6 +91,27 @@ export function SalesForecastPage() {
  const yearlyHistory = bucket.yearlyHistory;
  const monthlyHistory = bucket.monthlyHistory;
  const seasonality = bucket.seasonality;
+ // Chart data for "Monthly history · seasonality": one point per calendar month,
+ // each year's sales as a line + the seasonal index as a bar.
+ const seasByIdx: Record<number, number> = {};
+ for (const s of seasonality) seasByIdx[s.monthOfYear - 1] = s.index;
+ const histByYear: Record<string, (number | null)[]> = {};
+ for (const y of yearlyHistory) histByYear[y.year] = new Array(12).fill(null);
+ for (const m of monthlyHistory) {
+ const yr = m.ym.slice(0, 4); const mi = Number(m.ym.slice(5, 7)) - 1;
+ if (histByYear[yr] && mi >= 0 && mi < 12) histByYear[yr][mi] = m.total;
+ }
+ const seasonChart = MONTH_ABBR.map((mn, i) => {
+ const row: Record<string, number | string | null> = { month: mn, seasonality: seasByIdx[i] ?? null };
+ for (const y of yearlyHistory) row[y.year] = histByYear[y.year][i];
+ return row;
+ });
+ // Year-over-year chart: total sales (bars) + invoice count (line) per year.
+ const yoyChart = yearlyHistory.map((y, i) => {
+ const prev = yearlyHistory[i - 1];
+ const yoyPct = prev && prev.total > 0 ? ((y.total - prev.total) / prev.total) * 100 : null;
+ return { year: y.isPartial ? `${y.year} (YTD)` : y.year, Sales: y.total, Invoices: y.invoiceCount, yoy: yoyPct, partial: !!y.isPartial };
+ });
  const yoy = bucket.yoy;
  const weeklyAnalysis = bucket.weeklyAnalysis;
  const monthlyForecastV2 = bucket.monthlyForecast;
@@ -183,7 +211,32 @@ export function SalesForecastPage() {
  {subTab === 'history' && (
  <>
  <div className="section">
-  <div className="section-head"><div className="section-title">Year-over-year history</div></div>
+  <div className="section-head"><div>
+   <div className="section-title">Year-over-year history</div>
+   <div className="section-sub">Bars = total sales per year · line = invoice count · 2026 is YTD. Hover for YoY.</div>
+  </div></div>
+  <div style={{ width: '100%', height: 300, padding: '4px 12px 12px' }}>
+   <ResponsiveContainer>
+    <ComposedChart data={yoyChart} margin={{ top: 10, right: 8, left: 0, bottom: 4 }}>
+     <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+     <XAxis dataKey="year" stroke="var(--muted)" style={{ fontSize: 12 }} />
+     <YAxis yAxisId="left" stroke="var(--muted)" style={{ fontSize: 11 }} tickFormatter={(v) => `$${(v / 1000000).toFixed(1)}M`} width={56} />
+     <YAxis yAxisId="right" orientation="right" stroke="var(--muted)" style={{ fontSize: 11 }} width={40} />
+     <Tooltip
+      contentStyle={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12 }}
+      formatter={(v: number, name) => name === 'Invoices' ? [Number(v).toLocaleString(), name] : [formatCurrency(Number(v)), name]}
+     />
+     <Legend wrapperStyle={{ fontSize: 11 }} />
+     <Bar yAxisId="left" dataKey="Sales" name="Total sales" maxBarSize={80}>
+      {yoyChart.map((d, i) => <Cell key={i} fill={d.partial ? '#93c5fd' : '#2563eb'} />)}
+     </Bar>
+     <Line yAxisId="right" type="monotone" dataKey="Invoices" name="Invoices" stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} />
+    </ComposedChart>
+   </ResponsiveContainer>
+  </div>
+ </div>
+
+ <CollapsibleSection title="Year-over-year numbers (table)">
   <div className="table-wrap">
    <table className="data-table">
     <thead><tr><th>Year</th><th className="num">Total sales</th><th className="num">Invoices</th><th className="num">Months</th><th className="num">YoY</th></tr></thead>
@@ -205,10 +258,38 @@ export function SalesForecastPage() {
     </tbody>
    </table>
   </div>
- </div>
+ </CollapsibleSection>
 
  <div className="section">
-  <div className="section-head"><div className="section-title">Monthly history · seasonality</div></div>
+  <div className="section-head"><div>
+   <div className="section-title">Monthly history · seasonality</div>
+   <div className="section-sub">Lines = each year's monthly sales · bars = seasonal index (× vs average, 1.00 = avg). Hover a month for details.</div>
+  </div></div>
+  <div style={{ width: '100%', height: 320, padding: '4px 12px 12px' }}>
+   <ResponsiveContainer>
+    <ComposedChart data={seasonChart} margin={{ top: 10, right: 8, left: 0, bottom: 4 }}>
+     <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+     <XAxis dataKey="month" stroke="var(--muted)" style={{ fontSize: 11 }} />
+     <YAxis yAxisId="left" stroke="var(--muted)" style={{ fontSize: 11 }} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} width={52} />
+     <YAxis yAxisId="right" orientation="right" stroke="var(--muted)" style={{ fontSize: 11 }} domain={[0, 'auto']} tickFormatter={(v) => `${Number(v).toFixed(1)}×`} width={40} />
+     <Tooltip
+      contentStyle={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12 }}
+      formatter={(v: number, name) => name === 'Seasonality ×' ? [`${Number(v).toFixed(2)}×`, name] : [formatCurrency(Number(v)), name]}
+     />
+     <Legend wrapperStyle={{ fontSize: 11 }} />
+     <ReferenceLine yAxisId="right" y={1} stroke="#9ca3af" strokeDasharray="4 4" />
+     <Bar yAxisId="right" dataKey="seasonality" name="Seasonality ×" maxBarSize={26}>
+      {seasonChart.map((d, i) => <Cell key={i} fill={(Number(d.seasonality) || 1) >= 1 ? 'rgba(16,185,129,0.35)' : 'rgba(239,68,68,0.35)'} />)}
+     </Bar>
+     {yearlyHistory.map((y, i) => (
+      <Line key={y.year} yAxisId="left" type="monotone" dataKey={y.year} name={y.year} stroke={YEAR_COLORS[i % YEAR_COLORS.length]} strokeWidth={2} dot={{ r: 2 }} connectNulls />
+     ))}
+    </ComposedChart>
+   </ResponsiveContainer>
+  </div>
+ </div>
+
+ <CollapsibleSection title="Monthly numbers (table)" sub="The same history + seasonality as a table.">
   <div className="table-wrap">
    <table className="data-table">
     <thead><tr><th>Year</th>{['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'].map((m) => <th key={m} className="num">{m}</th>)}<th className="num">Total</th></tr></thead>
@@ -236,7 +317,7 @@ export function SalesForecastPage() {
     </tbody>
    </table>
   </div>
- </div>
+ </CollapsibleSection>
  </>
  )}
 

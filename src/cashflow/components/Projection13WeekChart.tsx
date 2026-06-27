@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -12,6 +13,25 @@ import {
 } from 'recharts';
 import type { Cashflow13 } from '../api';
 import { formatCurrency } from '../format';
+
+/** Tooltip that shows ONLY the segment the cursor is on (not the whole stack). */
+function oneSegTooltip(activeKey: string | null) {
+  return ({ active, payload, label }: { active?: boolean; payload?: Array<Record<string, unknown>>; label?: string }) => {
+    if (!active || !payload || payload.length === 0) return null;
+    const item = (activeKey ? payload.find((p) => p.dataKey === activeKey) : null) ?? payload[payload.length - 1];
+    if (!item) return null;
+    const color = (item.color ?? item.fill ?? item.stroke) as string | undefined;
+    return (
+      <div style={{ background: '#ffffff', border: '1px solid #e5e7eb', borderRadius: 8, fontSize: 13, padding: '8px 10px' }}>
+        <div style={{ color: '#6b7280', marginBottom: 4 }}>Week of {label}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ width: 10, height: 10, borderRadius: 2, background: color, display: 'inline-block' }} />
+          <span>{String(item.name)}: <strong>{formatCurrency(Math.abs(Number(item.value)))}</strong></span>
+        </div>
+      </div>
+    );
+  };
+}
 
 type Props = { data: Cashflow13 };
 
@@ -43,6 +63,7 @@ const outColorFor = (label: string, i: number) => OUTFLOW_COLORS[label] ?? OUTFL
  * right axis so both scale cleanly.
  */
 export function Projection13WeekChart({ data }: Props) {
+  const [activeKey, setActiveKey] = useState<string | null>(null);
   const { weeks, totals } = data;
   const inLines = data.inflows.filter((o) => !o.displayOnly);
   const outLines = data.outflows.filter((o) => !o.displayOnly);
@@ -79,11 +100,7 @@ export function Projection13WeekChart({ data }: Props) {
             tickFormatter={(v) => formatCurrency(Number(v))}
             width={88}
           />
-          <Tooltip
-            contentStyle={{ background: '#ffffff', border: '1px solid #e5e7eb', borderRadius: 8, fontSize: 13 }}
-            formatter={(value: number, name) => [formatCurrency(Math.abs(Number(value))), name]}
-            labelFormatter={(l) => `Week of ${l}`}
-          />
+          <Tooltip cursor={{ fill: 'transparent' }} content={oneSegTooltip(activeKey)} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
           <ReferenceLine yAxisId="left" y={0} stroke="#9ca3af" />
           {currentLabel && (
@@ -103,6 +120,7 @@ export function Projection13WeekChart({ data }: Props) {
               stackId="inflow"
               fill={inColorFor(o.label, i)}
               maxBarSize={22}
+              onMouseEnter={() => setActiveKey(o.label)}
             />
           ))}
           {outLines.map((o, i) => (
@@ -113,9 +131,10 @@ export function Projection13WeekChart({ data }: Props) {
               stackId="outflow"
               fill={outColorFor(o.label, i)}
               maxBarSize={22}
+              onMouseEnter={() => setActiveKey(o.label)}
             />
           ))}
-          <Line yAxisId="right" type="monotone" dataKey="Closing cash" stroke="#2563eb" strokeWidth={2.5} dot={{ r: 3 }} />
+          <Line yAxisId="right" type="monotone" dataKey="Closing cash" stroke="#2563eb" strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5, onMouseEnter: () => setActiveKey('Closing cash') }} />
         </ComposedChart>
       </ResponsiveContainer>
     </div>
