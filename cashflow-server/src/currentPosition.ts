@@ -139,10 +139,27 @@ async function queryAccounts(type: string): Promise<QbAccount[]> {
  return (data.QueryResponse.Account ?? []).filter((a) => a.Active !== false);
 }
 
+// The QB chart-of-accounts (with live balances) is the most-fetched QB resource:
+// getPureXBank, getDueFromPurex, getCurrentPosition all need it, often in the
+// same request burst. Cache it briefly + coalesce in-flight calls so ONE QB
+// query serves the whole burst - far less API load and fewer token-refresh
+// triggers (which is what keeps QuickBooks reliably connected). 60s keeps the
+// balances live enough while removing the redundant repeated fetches.
+let _acctCache: { at: number; data: QbAccount[] } | null = null;
+let _acctInflight: Promise<QbAccount[]> | null = null;
+const ACCT_TTL_MS = 60_000;
+
 export async function queryAllAccounts(): Promise<QbAccount[]> {
+ if (_acctCache && Date.now() - _acctCache.at < ACCT_TTL_MS) return _acctCache.data;
+ if (_acctInflight) return _acctInflight;
+ _acctInflight = (async () => {
  const q = encodeURIComponent(`select * from Account maxresults 1000`);
  const data = await qboGet<AccountQueryResponse>(`query?query=${q}&minorversion=70`);
- return (data.QueryResponse.Account ?? []).filter((a) => a.Active !== false);
+ const accts = (data.QueryResponse.Account ?? []).filter((a) => a.Active !== false);
+ _acctCache = { at: Date.now(), data: accts };
+ return accts;
+ })().finally(() => { _acctInflight = null; });
+ return _acctInflight;
 }
 
 async function queryOpenInvoices(): Promise<QbInvoice[]> {

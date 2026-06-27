@@ -432,18 +432,20 @@ app.get('/api/cron/prewarm', async (req, res) => {
  const t0 = Date.now();
  // 0. Keep the QB connection ALIVE: refresh the access token up front (one
  //    coalesced refresh) so the token chain never lapses - this is what keeps
- //    QuickBooks "always connected" even on idle days. Does the refresh ONCE so
- //    the warms below reuse it (no concurrent-refresh that could revoke it).
+ //    QuickBooks "always connected" even on idle days. AWAIT this (it's the
+ //    critical part) - it's fast and finishes well within the function limit, so
+ //    the rotating refresh token is always saved (never killed mid-refresh).
  let token = 'ok';
  try { const { getValidAccessToken } = await import('./oauth.js'); await getValidAccessToken(); }
  catch (e) { token = String(e instanceof Error ? e.message : e); }
- // QB first (warms the heavy QB caches sequentially to avoid throttle), then
- // sheets. Each step is best-effort: one upstream failing never aborts the rest.
- const qb = await prewarmQbCaches().then(() => 'ok').catch((e) => String(e instanceof Error ? e.message : e));
- const sheets = await prewarmSheetCaches().then(() => 'ok').catch((e) => String(e instanceof Error ? e.message : e));
- const seconds = Number(((Date.now() - t0) / 1000).toFixed(1));
- console.log(`[cron/prewarm] done in ${seconds}s (token=${token}, qb=${qb}, sheets=${sheets})`);
- res.json({ ok: true, seconds, token, qb, sheets });
+ // Warm all caches in the BACKGROUND (waitUntil keeps the function alive on
+ // Vercel until it settles or the limit). Returning immediately means the cron
+ // never 504s (no timeout glitch) and the warm runs best-effort after the reply.
+ const warm = Promise.allSettled([prewarmQbCaches(), prewarmSheetCaches()])
+   .then(() => console.log(`[cron/prewarm] caches warmed in ${((Date.now() - t0) / 1000).toFixed(1)}s`))
+   .catch(() => {});
+ try { const { waitUntil } = await import('@vercel/functions'); waitUntil(warm); } catch { void warm; }
+ res.json({ ok: true, token, warming: 'background' });
 });
 
 // Background watcher: refresh the snapshot every 30 min even with no user
