@@ -9,6 +9,9 @@
       "includeFiles": "cashflow-server/{dist/**,botKnowledge.json}"
     }
   },
+  "crons": [
+    { "path": "/api/cron/prewarm", "schedule": "0 * * * *" }
+  ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index" },
     { "source": "/auth/(.*)", "destination": "/api/index" },
