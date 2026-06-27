@@ -68,6 +68,17 @@ export type FinancialSnapshot = {
     collectionDays: number;
     topCustomers: CustomerAr[];
   };
+  collections: {
+    aging: { d0_30: number; d31_60: number; d61_90: number; d90plus: number; total: number };
+    chase: {
+      customer: string; open: number; collectible: number;
+      daysOldest: number;          // oldest open invoice age (days)
+      usualPayDays: number | null; // customer's historical median days-to-pay
+      overdueBy: number | null;    // daysOldest − usualPayDays (how late vs their own norm)
+      expectedWeek: number | null; // earliest week (1-based) they're projected to pay
+      invoices: number;
+    }[];
+  };
   intercompany: { purexClearing: number | null; dueFromPurex: number | null };
   burn: { weekly: number; monthly: number };
   health: { qbDown: boolean; warnings: string[] };
@@ -120,6 +131,48 @@ export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
     .map((c) => ({ ...c, open: +c.open.toFixed(2), collectible: +c.collectible.toFixed(2), collectibility: c.open > 0 ? +(c.collectible / c.open).toFixed(3) : 1 }))
     .sort((a, b) => b.open - a.open);
 
+  // Collections intelligence: aging + who-to-chase, from the per-invoice AR
+  // projection. Each invoice carries its age, the customer's historical median
+  // pay-days, and the week it's projected to pay - so the bot can advise WHO to
+  // collect from and which invoices have crossed Net 30 / 60 / 90.
+  const aging = { d0_30: 0, d31_60: 0, d61_90: 0, d90plus: 0, total: 0 };
+  type ChaseAcc = { customer: string; open: number; collectible: number; daysOldest: number; usualPayDays: number | null; expectedWeek: number | null; invoices: number };
+  const chaseMap = new Map<string, ChaseAcc>();
+  const todayMs = Date.parse(cf.asOf) || Date.now();
+  if (arProj) {
+    for (const p of arProj.placements) {
+      const open = p.openBalance ?? 0;
+      if (open <= 0) continue;
+      const invMs = Date.parse(p.invoiceDate + 'T00:00:00Z');
+      const daysOut = Number.isFinite(invMs) ? Math.max(0, Math.floor((todayMs - invMs) / 86_400_000)) : 0;
+      if (daysOut <= 30) aging.d0_30 += open;
+      else if (daysOut <= 60) aging.d31_60 += open;
+      else if (daysOut <= 90) aging.d61_90 += open;
+      else aging.d90plus += open;
+      aging.total += open;
+      const note = p.placements?.[0]?.targetMonth ?? '';
+      const mm = note.match(/median\s+(\d+)\s*d/i);
+      const median = mm ? Number(mm[1]) : null;
+      let expWk: number | null = null;
+      for (const pl of p.placements ?? []) for (const wi of pl.weekIndices ?? []) if (expWk == null || wi < expWk) expWk = wi;
+      const cur = chaseMap.get(p.customer) ?? { customer: p.customer, open: 0, collectible: 0, daysOldest: 0, usualPayDays: median, expectedWeek: expWk, invoices: 0 };
+      cur.open += open;
+      cur.collectible += p.projectedCollectible ?? open;
+      cur.daysOldest = Math.max(cur.daysOldest, daysOut);
+      if (cur.usualPayDays == null && median != null) cur.usualPayDays = median;
+      if (expWk != null && (cur.expectedWeek == null || expWk < cur.expectedWeek)) cur.expectedWeek = expWk;
+      cur.invoices += 1;
+      chaseMap.set(p.customer, cur);
+    }
+  }
+  (Object.keys(aging) as (keyof typeof aging)[]).forEach((k) => { aging[k] = +aging[k].toFixed(2); });
+  const chase = [...chaseMap.values()].map((c) => ({
+    customer: c.customer, open: +c.open.toFixed(2), collectible: +c.collectible.toFixed(2),
+    daysOldest: c.daysOldest, usualPayDays: c.usualPayDays,
+    overdueBy: c.usualPayDays != null ? c.daysOldest - c.usualPayDays : null,
+    expectedWeek: c.expectedWeek != null ? c.expectedWeek + 1 : null, invoices: c.invoices,
+  })).sort((a, b) => b.collectible - a.collectible);
+
   const BUSINESS_CASH_RE = /crb indirect|7561|business mm|0910/i;
   const accounts = (till?.cashAccounts ?? [])
     .filter((a) => BUSINESS_CASH_RE.test(a.name))
@@ -161,6 +214,7 @@ export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
       collectionDays: arProj?.globalAvgCollectionDays ?? 0,
       topCustomers,
     },
+    collections: { aging, chase },
     intercompany: {
       purexClearing: purex ? purex.clearing : null,
       dueFromPurex: (linked?.qb.intercompanyExcluded ?? []).find((a) => /due from purex|gelato net ?90/i.test(a.name))?.balance ?? null,
@@ -828,6 +882,62 @@ const INTENTS: Intent[] = [
           `• Gelato: ${money(s.gelato.net)} still to collect.`,
         ],
         note: SOURCE.ar_lt,
+      };
+    },
+  },
+  {
+    id: 'collect_from',
+    phrases: ['who to collect', 'who should i chase', 'kisse paisa', 'kis se paisa', 'kisse paise', 'paisa kis se', 'kis se le', 'vasooli', 'collect from', 'chase payment', 'follow up', 'recover money', 'paise kaun dega', 'kaun dega paisa', 'whom to call', 'collection priority', 'easy collections', 'low hanging'],
+    keywords: ['collect', 'chase', 'vasooli', 'recover'],
+    handler: (s) => {
+      const chase = s.collections.chase;
+      if (chase.length === 0) return { title: `Nothing to chase right now.`, lines: [`No open Little Tree receivables - it's all collected.`] };
+      // Overdue vs each customer's OWN pay history first, then largest collectible.
+      const ranked = [...chase].sort((a, b) => {
+        const aOver = (a.overdueBy ?? -999) > 5 ? 1 : 0, bOver = (b.overdueBy ?? -999) > 5 ? 1 : 0;
+        if (aOver !== bOver) return bOver - aOver;
+        return b.collectible - a.collectible;
+      }).slice(0, 12);
+      const lines = ranked.map((c) => {
+        const bits = [`${c.customer}: ${money(c.collectible)}`];
+        if (c.usualPayDays != null) {
+          bits.push((c.overdueBy ?? 0) > 5
+            ? `usually pays in ~${c.usualPayDays}d, now ${c.daysOldest}d - overdue by ${c.overdueBy}d, chase now`
+            : `usually pays in ~${c.usualPayDays}d, at ${c.daysOldest}d`);
+        } else bits.push(`${c.daysOldest}d outstanding`);
+        if (c.expectedWeek != null) bits.push(`expected ~wk ${c.expectedWeek}`);
+        return `• ${bits.join(' · ')}`;
+      });
+      const overdue = ranked.filter((c) => (c.overdueBy ?? 0) > 5);
+      const overdueTot = overdue.reduce((t, c) => t + c.collectible, 0);
+      return {
+        title: overdue.length
+          ? `Chase these first - ${money(overdueTot)} from ${overdue.length} customer${overdue.length > 1 ? 's' : ''} past their usual pay timing:`
+          : `Top receivables to collect:`,
+        lines,
+        note: `"Usually pays in Nd" = each customer's median from their paid history. Well past it = easiest wins to call. Sorted by overdue-vs-their-own-norm, then size.`,
+      };
+    },
+  },
+  {
+    id: 'aging',
+    phrases: ['aging', 'ageing', 'net 30', 'net 60', 'net 90', 'past due', 'overdue invoices', 'how overdue', 'kitne din se', 'kitne din ho gaye', 'days outstanding', 'invoices overdue', 'old invoices', 'invoice net', 'crossed net'],
+    keywords: ['aging', 'ageing', 'overdue'],
+    handler: (s) => {
+      const a = s.collections.aging;
+      if (a.total <= 0) return { title: `No open receivables to age right now.`, lines: [`It's all collected.`] };
+      const pastNet30 = a.d31_60 + a.d61_90 + a.d90plus;
+      const pastNet60 = a.d61_90 + a.d90plus;
+      return {
+        title: `AR aging on ${money(a.total)} outstanding:`,
+        lines: [
+          `• Current (0-30 days): ${money(a.d0_30)} (${pct(a.d0_30 / a.total)})`,
+          `• Past Net 30 (31-60 days): ${money(a.d31_60)} (${pct(a.d31_60 / a.total)})`,
+          `• Past Net 60 (61-90 days): ${money(a.d61_90)} (${pct(a.d61_90 / a.total)})`,
+          `• Past Net 90 (90+ days): ${money(a.d90plus)} (${pct(a.d90plus / a.total)})`,
+          `${money(pastNet30)} has crossed Net 30 and ${money(pastNet60)} crossed Net 60 - that's what needs chasing. Ask "who to collect from" for the priority list.`,
+        ],
+        note: `Age = today minus each invoice's date (non-Gelato AR).`,
       };
     },
   },
