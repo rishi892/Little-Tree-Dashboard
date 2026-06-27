@@ -577,8 +577,12 @@ app.get('/api/combined-actual', async (req, res, next) => {
  try {
  const month = String(req.query.month ?? '').slice(0, 7);
  if (!/^\d{4}-\d{2}$/.test(month)) { res.status(400).json({ error: 'month (YYYY-MM) required' }); return; }
+ const force = req.query.refresh === '1';
  const { getCombinedActualForMonth } = await import('./combinedActual.js');
- res.json(await getCombinedActualForMonth(month));
+ // Durable-cached per month so the Variance tab serves instantly on serverless
+ // (was a live QB + sheet recompute on every open).
+ const { data } = await withDurableCache(`combined-actual:${month}`, 30 * 60 * 1000, () => getCombinedActualForMonth(month), (d) => d != null, force);
+ res.json(data);
  } catch (err) { next(err); }
 });
 
@@ -697,8 +701,12 @@ app.get('/api/weekly-snapshots', async (_req, res, next) => {
  *   - actuals: live sales + AR from LT Financials in that week's date range
  *     (capped at today for in-progress weeks)
  */
-app.get('/api/past-weeks-grid', async (_req, res, next) => {
+app.get('/api/past-weeks-grid', async (req, res, next) => {
  try {
+  const force = req.query.refresh === '1';
+  // Durable-cached so the Past + Variance grid serves instantly on serverless
+  // (was a live snapshot + sheet-actuals + QB-weekly-expense recompute per open).
+  const { data, cached } = await withDurableCache('past-weeks-grid', 30 * 60 * 1000, async () => {
   const { listSnapshots } = await import('./weeklySnapshots.js');
   const { getWeekActuals } = await import('./snapshotActuals.js');
   const { getWeeklyExpensesForWeeks, getExpectedInflowByWeek } = await import('./weeklyActuals.js');
@@ -746,7 +754,9 @@ app.get('/api/past-weeks-grid', async (_req, res, next) => {
   } catch (e) {
    (items[0] ?? {}).qbErr = e instanceof Error ? e.message : String(e);
   }
-  res.json({ count: items.length, items });
+  return { count: items.length, items };
+  }, (d) => d != null && Array.isArray((d as { items?: unknown }).items), force);
+  res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
@@ -762,8 +772,12 @@ app.delete('/api/weekly-snapshots/:monday', async (req, res, next) => {
 // as the 13-week cashflow, but returns the full per-brand drilldown (history,
 // trend, bounds, lag curve, weekly cash) so the Sales Forecast page can
 // explain WHY each number was chosen.
-app.get('/api/current-month-overview', async (_req, res, next) => {
+app.get('/api/current-month-overview', async (req, res, next) => {
  try {
+  const force = req.query.refresh === '1';
+  // Durable-cached so the Actuals tab serves instantly on serverless (was a live
+  // sales-forecast + AR-projection + Gelato recompute on every open).
+  const { data, cached } = await withDurableCache('current-month-overview', 15 * 60 * 1000, async () => {
   const { getArActualsForWeek, getSalesInvoicedForWeek, getOpenArAsOf } = await import('./snapshotActuals.js');
   const { getSalesForecast } = await import('./salesForecast.js');
   const { getArProjection } = await import('./arProjection.js');
@@ -844,7 +858,7 @@ app.get('/api/current-month-overview', async (_req, res, next) => {
   const salesProjMonth = salesForecast.monthlyForecastV2.find(m => m.ym === ym)?.forecastedSales ?? 0;
   const salesProjBest  = salesForecast.monthlyForecastBest .find(m => m.ym === ym)?.forecastedSales ?? 0;
   const salesProjWorst = salesForecast.monthlyForecastWorst.find(m => m.ym === ym)?.forecastedSales ?? 0;
-  res.json({
+  return {
    month: { ym, label: monthLabel, start: monthStart, end: monthEnd, daysInMonth, dayOfMonth, progressPct: +(dayOfMonth / daysInMonth * 100).toFixed(1) },
    sales: {
     projected: { base: salesProjMonth, best: salesProjBest, worst: salesProjWorst },
@@ -855,7 +869,9 @@ app.get('/api/current-month-overview', async (_req, res, next) => {
     nonGelato: { projected: arProjNonGelatoMonth, collected: arActualsMtd.nonGelato.amount, invoiceCount: arActualsMtd.nonGelato.invoiceCount },
    },
    openArAsOfToday: openAr,
-  });
+  };
+  }, (d) => d != null, force);
+  res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
