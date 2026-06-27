@@ -131,8 +131,13 @@ export function CurrentPosition() {
  const pureXBank = qb.intercompanyExcluded.find(
  (a) => a.accountType === 'Bank' && /purex/i.test(a.name) && !/due from|gelato|net ?90/i.test(a.name),
  ) ?? null;
+ // For a BANK account, "cash in hand" = the AVAILABLE balance (spendable now,
+ // net of pending holds/authorisations), falling back to the ledger balance when
+ // Tiller doesn't report an available figure.
+ const cih = (t: { balance: number; balanceAvailable: number | null } | null): number =>
+ t ? (t.balanceAvailable != null ? t.balanceAvailable : t.balance) : 0;
  const cashTotalLive =
- cashRows.reduce((s, r) => s + (r.tiller?.balance ?? 0), 0)
+ cashRows.reduce((s, r) => s + cih(r.tiller), 0)
  + (pureXBank?.balance ?? 0)
  + (dueFromPurex?.balance ?? 0);
 
@@ -206,7 +211,7 @@ export function CurrentPosition() {
  <th>Account (per QB / lender sheet)</th>
  <th>QB Account</th>
  <th>Tiller Account</th>
- <th className="num">Balance (Tiller live)</th>
+ <th className="num">Cash in hand (Tiller available)</th>
  <th>Notes</th>
  </tr>
  </thead>
@@ -232,8 +237,11 @@ export function CurrentPosition() {
  </td>
  <td className="num">
  <strong style={{ color: '#059669' }}>
- {r.tiller ? formatCurrency(r.tiller.balance, true) : '-'}
+ {r.tiller ? formatCurrency(cih(r.tiller), true) : '-'}
  </strong>
+ {r.tiller && r.tiller.balanceAvailable != null && Math.round(r.tiller.balanceAvailable) !== Math.round(r.tiller.balance) && (
+ <div className="vendor-note">available · ledger {formatCurrency(r.tiller.balance, true)}</div>
+ )}
  </td>
  <td className="vendor-note">{r.notes}</td>
  </tr>
@@ -311,8 +319,14 @@ export function CurrentPosition() {
  ? limit - used
  : (r.tiller?.balanceAvailable != null ? Math.abs(r.tiller.balanceAvailable) : null);
  const pct = r.tiller?.usePct;
- const pctColor = pct != null
- ? (pct >= 1 ? 'var(--danger)' : pct >= 0.8 ? 'var(--warn)' : 'var(--muted)')
+ // Colour by how much credit is still AVAILABLE (avail ÷ limit):
+ //   overused (avail < 0) → red · ≤20% left → yellow · ≥80% left → green.
+ const availPct = (avail != null && limit != null && limit > 0) ? avail / limit : null;
+ const availColor = avail != null && avail < 0
+ ? 'var(--danger)'
+ : availPct == null ? 'var(--muted)'
+ : availPct <= 0.2 ? 'var(--warn)'
+ : availPct >= 0.8 ? '#059669'
  : 'var(--muted)';
  return (
  <tr key={r.label} className={!r.tiller ? 'row-none' : ''}>
@@ -323,13 +337,13 @@ export function CurrentPosition() {
  <td className="num">
  {r.tiller ? formatCurrency(used, true) : '-'}
  </td>
- <td className="num" style={{ color: avail != null && avail < 500 ? 'var(--danger)' : undefined }}>
+ <td className="num" style={{ color: availColor, fontWeight: 700 }}>
  {avail != null ? formatCurrency(avail, true) : '-'}
  </td>
  <td className="num">
  {limit != null ? formatCurrency(limit, true) : '-'}
  </td>
- <td className="num" style={{ color: pctColor, fontWeight: 600 }}>
+ <td className="num" style={{ color: availColor, fontWeight: 600 }}>
  {pct != null ? (pct * 100).toFixed(1) + '%' : '-'}
  </td>
  <td className="vendor-note">{r.tiller?.lastStatementClose ?? '-'}</td>
