@@ -154,7 +154,9 @@ export async function getDashboardData(monthsBack = 12): Promise<DashboardData> 
  const t = await getTillerBalances();
  const BUSINESS_RE = /crb indirect|7561|business mm|0910/i;
  const accounts = t.cashAccounts.filter((a) => BUSINESS_RE.test(a.name));
- return { total: accounts.reduce((s, a) => s + a.balance, 0), accounts };
+ // Cash in hand = available balance (spendable), fall back to ledger balance.
+ const cih = (a: { balance: number; balanceAvailable: number | null }) => a.balanceAvailable != null ? a.balanceAvailable : a.balance;
+ return { total: accounts.reduce((s, a) => s + cih(a), 0), accounts };
  } catch { return null; }
  })(),
  (async () => {

@@ -205,7 +205,7 @@ export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
   const BUSINESS_CASH_RE = /crb indirect|7561|business mm|0910/i;
   const accounts = (till?.cashAccounts ?? [])
     .filter((a) => BUSINESS_CASH_RE.test(a.name))
-    .map((a) => ({ name: a.name, balance: a.balance, lastUpdated: a.lastUpdated }));
+    .map((a) => ({ name: a.name, balance: a.balanceAvailable != null ? a.balanceAvailable : a.balance, lastUpdated: a.lastUpdated }));
   const cards = [...(till?.creditCards ?? []), ...(till?.loans ?? [])].map((a) => {
     const used = Math.abs(a.balance);
     const limit = a.balanceLimit != null ? Math.abs(a.balanceLimit) : null;

@@ -296,8 +296,11 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  try {
  const tiller = await getTillerBalances();
  const banks = tiller.cashAccounts.filter((a) => BUSINESS_CASH_RE.test(a.name));
- liquidBankWk1 = +banks.reduce((s, a) => s + a.balance, 0).toFixed(2);
- for (const a of banks) bankAccountsDetail.push({ label: a.name, amount: +a.balance.toFixed(2) });
+ // Cash in hand = AVAILABLE balance (spendable, net of pending holds); fall back
+ // to the ledger balance when Tiller doesn't report an available figure.
+ const cih = (a: { balance: number; balanceAvailable: number | null }) => a.balanceAvailable != null ? a.balanceAvailable : a.balance;
+ liquidBankWk1 = +banks.reduce((s, a) => s + cih(a), 0).toFixed(2);
+ for (const a of banks) bankAccountsDetail.push({ label: a.name, amount: +cih(a).toFixed(2) });
  // CC payoff: include both creditCards bucket AND loans bucket (MC Consumer
  // is categorised as a loan by Tiller but is functionally a CC).
  ccPayoff = [...tiller.creditCards, ...tiller.loans].reduce((s, a) => s + Math.abs(a.balance), 0);

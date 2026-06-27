@@ -239,9 +239,6 @@ export function CurrentPosition() {
  <strong style={{ color: '#059669' }}>
  {r.tiller ? formatCurrency(cih(r.tiller), true) : '-'}
  </strong>
- {r.tiller && r.tiller.balanceAvailable != null && Math.round(r.tiller.balanceAvailable) !== Math.round(r.tiller.balance) && (
- <div className="vendor-note">available · ledger {formatCurrency(r.tiller.balance, true)}</div>
- )}
  </td>
  <td className="vendor-note">{r.notes}</td>
  </tr>
