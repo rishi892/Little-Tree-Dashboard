@@ -10,7 +10,7 @@
     }
   },
   "crons": [
-    { "path": "/api/cron/prewarm", "schedule": "0 * * * *" }
+    { "path": "/api/cron/prewarm", "schedule": "0 8 * * *" }
   ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index" },
