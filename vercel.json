@@ -5,13 +5,10 @@
   "outputDirectory": "dist",
   "functions": {
     "api/index.js": {
-      "maxDuration": 300,
+      "maxDuration": 60,
       "includeFiles": "cashflow-server/{dist/**,botKnowledge.json}"
     }
   },
-  "crons": [
-    { "path": "/api/cron/prewarm", "schedule": "0 * * * *" }
-  ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index" },
     { "source": "/auth/(.*)", "destination": "/api/index" },
