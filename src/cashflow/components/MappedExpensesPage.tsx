@@ -436,19 +436,6 @@ export function MappedExpensesPage({ entity, title, subtitle, totalLabel }: Prop
  </div>
  </div>
 
- {data.unmatched.length > 0 && (
- <div className="section" style={{ padding: '12px 18px' }}>
- <div className="section-title" style={{ fontSize: 13 }}>Unmatched QB accounts ({data.unmatched.length})</div>
- <div className="page-sub" style={{ fontSize: 12, marginBottom: 8 }}>
- These QB accounts have $ activity for {entity} but no sheet category caught them. If important, tell me which category should claim them.
- </div>
- <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
- {data.unmatched.slice(0, 30).map((u) => (
- <span key={u.category} className="pill-tag tag-line">{u.category} · {formatCurrency(u.total)}</span>
- ))}
- </div>
- </div>
- )}
  </>
  );
 }

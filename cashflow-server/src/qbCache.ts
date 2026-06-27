@@ -120,7 +120,16 @@ export async function withDurableCache<T>(
 
   // Stale but present, and not ancient → serve stale NOW, refresh in background
   // (guaranteed to complete via waitUntil, so the cache actually updates).
-  const ancient = best ? now - best.at > ttlMs * 4 : true;
+  //
+  // The stale-serve window has a floor (ANCIENT_FLOOR_MS) so short-TTL keys
+  // never block a user on a heavy recompute just because the page wasn't
+  // visited for a few TTLs. On serverless the in-memory cache dies on every
+  // cold start, so a CFO opening the dashboard after an hour would otherwise
+  // always hit a blocking 30-60s recompute. We'd rather show last-good
+  // instantly and refresh in the background; only data with NO successful
+  // refresh in a very long time (>24h) forces a blocking recompute.
+  const ANCIENT_FLOOR_MS = 24 * 60 * 60 * 1000; // 24h
+  const ancient = best ? now - best.at > Math.max(ttlMs * 4, ANCIENT_FLOOR_MS) : true;
   if (!force && best && !ancient) {
     background(recompute(key, produce, isGood, best));
     return { data: best.data, cached: true };

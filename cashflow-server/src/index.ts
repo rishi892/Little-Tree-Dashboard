@@ -416,6 +416,30 @@ app.get('/api/assistant/changes', async (req, res, next) => {
  } catch (err) { next(err); }
 });
 
+// ── Scheduled cache warmer (Vercel Cron) ─────────────────────────────────────
+// On serverless there is no long-running process, so the durable Supabase cache
+// is kept hot by an hourly Vercel Cron hit to this endpoint (see vercel.json
+// "crons": "0 * * * *"). It force-refreshes every dashboard cache so user
+// requests always serve fresh-within-the-hour data instantly from cache - no
+// 30-60s live recompute on open. Protected by CRON_SECRET when set: Vercel
+// auto-sends `Authorization: Bearer $CRON_SECRET` on cron requests.
+app.get('/api/cron/prewarm', async (req, res) => {
+ const secret = process.env.CRON_SECRET;
+ if (secret && req.headers.authorization !== `Bearer ${secret}`) {
+ res.status(401).json({ error: 'unauthorized' });
+ return;
+ }
+ const t0 = Date.now();
+ // QB first (refreshes the token + warms the heavy QB caches sequentially to
+ // avoid throttle), then sheets (reuse the now-fresh token). Each step is
+ // best-effort: one upstream failing never aborts the rest.
+ const qb = await prewarmQbCaches().then(() => 'ok').catch((e) => String(e instanceof Error ? e.message : e));
+ const sheets = await prewarmSheetCaches().then(() => 'ok').catch((e) => String(e instanceof Error ? e.message : e));
+ const seconds = Number(((Date.now() - t0) / 1000).toFixed(1));
+ console.log(`[cron/prewarm] done in ${seconds}s (qb=${qb}, sheets=${sheets})`);
+ res.json({ ok: true, seconds, qb, sheets });
+});
+
 // Background watcher: refresh the snapshot every 30 min even with no user
 // activity, so the bot's change-history (and "what changed") stays current on
 // its own. Seed once shortly after startup.
@@ -1224,29 +1248,18 @@ app.get('/api/sales-by-channel', async (req, res, next) => {
 });
 
 // AR live ledger - fetched from the user's invoice Google Sheet.
-const AR_TTL_MS = 10 * 1000;
-let arCache: { at: number; data: ArResult } | null = null;
-let arInFlight: Promise<ArResult> | null = null;
+// Little Tree open AR. Durable-cached (Supabase) so a serverless cold start
+// serves last-good instantly instead of re-scraping the sheet on every poll.
+const AR_TTL_MS = 5 * 60 * 1000;
+const isGoodAr = (d: ArResult): boolean => d != null && d.totals != null;
+const getArOpenCached = (force = false) =>
+  withDurableCache('ar-open', AR_TTL_MS, getArOpen, isGoodAr, force);
 
 app.get('/api/ar/open', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- if (!force && arCache && Date.now() - arCache.at < AR_TTL_MS) {
- res.json({ cached: true, ...arCache.data });
- return;
- }
- if (!arInFlight) {
- arInFlight = getArOpen()
- .then((data) => {
- arCache = { at: Date.now(), data };
- return data;
- })
- .finally(() => {
- arInFlight = null;
- });
- }
- const data = await arInFlight;
- res.json({ cached: false, ...data });
+ const { data, cached } = await getArOpenCached(force);
+ res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
@@ -1269,24 +1282,18 @@ app.get('/api/expenses-mapped', async (req, res, next) => {
  } catch (err) { next(err); }
 });
 
-// Gelato AR - live from the Gelato Sales / Batches Google Sheet.
-const GELATO_TTL_MS = 10 * 1000;
-let gelatoCache: { at: number; data: GelatoArResult } | null = null;
-let gelatoInFlight: Promise<GelatoArResult> | null = null;
+// Gelato AR - live from the Gelato Sales / Batches Google Sheet. Durable-cached
+// so a serverless cold start serves last-good instantly (no re-scrape per poll).
+const GELATO_TTL_MS = 5 * 60 * 1000;
+const isGoodGelato = (d: GelatoArResult): boolean => d != null && d.totals != null;
+const getGelatoArCached = (force = false) =>
+  withDurableCache('gelato-ar', GELATO_TTL_MS, getGelatoAr, isGoodGelato, force);
 
 app.get('/api/gelato-ar', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- if (!force && gelatoCache && Date.now() - gelatoCache.at < GELATO_TTL_MS) {
- res.json({ cached: true, ...gelatoCache.data });
- return;
- }
- if (!gelatoInFlight) {
- gelatoInFlight = getGelatoAr()
- .then((data) => { gelatoCache = { at: Date.now(), data }; return data; })
- .finally(() => { gelatoInFlight = null; });
- }
- res.json({ cached: false, ...(await gelatoInFlight) });
+ const { data, cached } = await getGelatoArCached(force);
+ res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
@@ -1311,24 +1318,18 @@ app.get('/api/collection-curve', async (req, res, next) => {
  } catch (err) { next(err); }
 });
 
-// PureX clearing - Sales (tracker sheet) − Expense (QB PureX-paid).
-const PUREX_TTL_MS = 10 * 1000;
-let purexCache: { at: number; data: PurexClearingResult } | null = null;
-let purexInFlight: Promise<PurexClearingResult> | null = null;
+// PureX clearing - Sales (tracker sheet) − Expense (QB PureX-paid). Durable-cached
+// so a serverless cold start serves last-good instantly (no recompute per poll).
+const PUREX_TTL_MS = 5 * 60 * 1000;
+const isGoodPurex = (d: PurexClearingResult): boolean => d != null && Number.isFinite(d.clearing);
+const getPurexClearingCached = (force = false) =>
+  withDurableCache('purex-clearing', PUREX_TTL_MS, getPurexClearing, isGoodPurex, force);
 
 app.get('/api/purex-clearing', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- if (!force && purexCache && Date.now() - purexCache.at < PUREX_TTL_MS) {
- res.json({ cached: true, ...purexCache.data });
- return;
- }
- if (!purexInFlight) {
- purexInFlight = getPurexClearing()
- .then((data) => { purexCache = { at: Date.now(), data }; return data; })
- .finally(() => { purexInFlight = null; });
- }
- res.json({ cached: false, ...(await purexInFlight) });
+ const { data, cached } = await getPurexClearingCached(force);
+ res.json({ cached, ...data });
  } catch (err) { next(err); }
 });
 
@@ -1446,10 +1447,10 @@ async function prewarmSheetCaches(): Promise<void> {
  const t0 = Date.now();
  await Promise.allSettled([
  warm('tiller', () => getTillerBalances(), (data, at) => { tillerCache = { at, data }; }),
- warm('ar', () => getArOpen(), (data, at) => { arCache = { at, data }; }),
- warm('gelato-ar', () => getGelatoAr(), (data, at) => { gelatoCache = { at, data }; }),
+ warm('ar', () => getArOpenCached(true), () => {/* durable cache populated inside */}),
+ warm('gelato-ar', () => getGelatoArCached(true), () => {/* durable cache populated inside */}),
  warm('settlement', () => getSettlementHistory(), (data, at) => { settleCache = { at, data }; }),
- warm('purex-clearing', () => getPurexClearing(), (data, at) => { purexCache = { at, data }; }),
+ warm('purex-clearing', () => getPurexClearingCached(true), () => {/* durable cache populated inside */}),
  warm('sheet-expenses', () => getSheetExpenses(), (data, at) => { seCache = { at, data }; }),
  ]);
  // Cashflow-13week reads sheet AR live each call, but its QB-side inputs
