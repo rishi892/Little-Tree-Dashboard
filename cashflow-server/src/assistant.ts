@@ -444,6 +444,56 @@ function findExpenseRow(snap: FinancialSnapshot, n: string) {
   return score > 0 ? best : null;
 }
 
+// Match a question to ANY cashflow line (inflow OR outflow), also peeking at each
+// line's breakdown labels so "hubspot breakdown" finds the Software line.
+function findAnyLine(snap: FinancialSnapshot, n: string): CashflowLine | null {
+  const lines = [...snap.inflows, ...snap.outflows];
+  const tokens = n.trim().split(' ').filter((t) => t.length >= 3);
+  let best: CashflowLine | null = null, score = 0;
+  for (const l of lines) {
+    const lab = ' ' + l.label.toLowerCase() + ' ';
+    let sc = 0;
+    for (const t of tokens) if (lab.includes(t)) sc += t.length;
+    for (const b of l.breakdown ?? []) {
+      const bl = ' ' + b.label.toLowerCase() + ' ';
+      for (const t of tokens) if (bl.includes(t)) sc += t.length * 0.5;
+    }
+    if (sc > score) { score = sc; best = l; }
+  }
+  return score > 0 ? best : null;
+}
+
+const BREAKDOWN_WORDS = ['breakdown', 'break down', 'break up', 'kiska kitna', 'kaun kaun', 'kon kon', 'components', 'itemize', 'itemise', 'split up', 'saare', 'sab kaun', 'puri list', 'full list', 'list of', 'who all', 'line by line', 'kis kis'];
+function hasBreakdownWords(n: string): boolean {
+  return BREAKDOWN_WORDS.some((w) => n.includes(w));
+}
+
+// List EVERY component of a line (payroll payees, software vendors, AR heads...),
+// proportioned to the line's real total - the same "who/what" the dashboard shows.
+function breakdownAnswer(s: FinancialSnapshot, line: CashflowLine, n: string): Answer {
+  const total13 = line.values.reduce((a, b) => a + b, 0);
+  const bd = line.breakdown ?? [];
+  if (bd.length === 0) {
+    return { title: `${line.label} has no further breakdown.`, lines: [`It totals ${money(total13)} over the 13 weeks.`], note: SOURCE.expenses };
+  }
+  const sumAmt = bd.reduce((a, b) => a + Math.abs(b.amount), 0) || 1;
+  const ranked = bd.map((b) => ({ label: b.label, share: Math.abs(b.amount) / sumAmt })).sort((a, b) => b.share - a.share);
+  const wk = extractWeek(n);
+  if (wk != null) {
+    const i = wk - 1; const lineWk = line.values[i] ?? 0;
+    return {
+      title: `${line.label} in ${weekName(s, i)} is ${money(lineWk)}, split by who/what:`,
+      lines: ranked.map((x) => `• ${x.label}: ${money(lineWk * x.share)} (${pct(x.share)})`),
+      note: `Each component's share of that week - the same breakdown shown on the dashboard.`,
+    };
+  }
+  return {
+    title: `${line.label} = ${money(total13)} over 13 weeks, broken down by who/what (${bd.length} items):`,
+    lines: ranked.map((x) => `• ${x.label}: ${money(total13 * x.share)} (${pct(x.share)})`),
+    note: `Each item's share of the line - the same per-payee / per-vendor breakdown shown on the dashboard.`,
+  };
+}
+
 const INTENTS: Intent[] = [
   {
     id: 'greeting',
@@ -651,6 +701,11 @@ const INTENTS: Intent[] = [
     phrases: ['payroll', 'salary', 'salaries', 'inventory', 'raw material', 'rent', 'insurance', 'how much on', 'kis pe kitna', 'spend on'],
     keywords: ['payroll', 'salary', 'inventory', 'rent'],
     handler: (s, n) => {
+      // "payroll breakdown" / "software me kaun kaun" → list the full breakdown.
+      if (hasBreakdownWords(n)) {
+        const line = findAnyLine(s, n);
+        if (line) return breakdownAnswer(s, line, n);
+      }
       const best = findExpenseRow(s, n);
       if (!best) {
         return {
@@ -682,6 +737,25 @@ const INTENTS: Intent[] = [
         lines: ranked.map((x, i) => `• ${i + 1}. ${x.label}: ${money(x.t)} (${pct(x.t / s.outflow13w)})`),
         note: SOURCE.expenses,
       };
+    },
+  },
+  {
+    id: 'breakdown',
+    phrases: ['breakdown', 'break down', 'break up', 'kiska kitna', 'kaun kaun', 'kon kon', 'kis kis', 'components', 'itemize', 'split up', 'puri list', 'full list', 'list of', 'who all', 'line by line', 'sab kaun'],
+    keywords: ['breakdown', 'components', 'itemize'],
+    handler: (s, n) => {
+      const line = findAnyLine(s, n);
+      if (!line) {
+        return {
+          title: `Which line should I break down?`,
+          lines: [
+            `Money in: ${s.inflows.map((l) => l.label).join(' · ')}`,
+            `Money out: ${s.outflows.map((l) => l.label).join(' · ')}`,
+            `Try "payroll breakdown", "software breakdown", "past AR breakdown" - add a week like "payroll breakdown week 3" for that week.`,
+          ],
+        };
+      }
+      return breakdownAnswer(s, line, n);
     },
   },
   {
