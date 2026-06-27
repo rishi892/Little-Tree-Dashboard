@@ -16,6 +16,7 @@ import { getTillerBalances, type TillerBalances } from './tiller.js';
 import { getPurexClearing, type PurexClearingResult } from './purexClearing.js';
 import { getLinkedBalances, type LinkedBalances } from './linkedAccounts.js';
 import { getSameWeekCollectionRate, getCollectionLagCurve } from './snapshotActuals.js';
+import { getMonthlyOpex } from './monthlyOpex.js';
 import { recordHistory, getChanges } from './assistantHistory.js';
 import { dbInsert } from './db.js';
 import fs from 'node:fs';
@@ -79,9 +80,15 @@ export type FinancialSnapshot = {
       expectedWeek: number | null; // earliest week (1-based) they're projected to pay
       invoices: number;
     }[];
+    invoiceList: { invoiceNumber: string; customer: string; open: number; daysOut: number; status: string }[];
   };
   // Inputs for live what-if maths (e.g. "if sales rise 20%, weekly collection?").
   scenarioData: { salesWeekly: number[]; sameWeekRate: number; lagCurve: number[] };
+  salesInsights: {
+    yoy: { year: string; total: number; growthPct: number | null }[];
+    seasonality: { month: number; index: number }[];   // monthOfYear 1-12, ×vs avg
+  } | null;
+  monthlyOpex: { month: string; lt: number; purex: number; total: number }[];
   intercompany: { purexClearing: number | null; dueFromPurex: number | null };
   burn: { weekly: number; monthly: number };
   health: { qbDown: boolean; warnings: string[] };
@@ -103,7 +110,7 @@ const SNAP_TTL_MS = 30 * 1000;
 export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
   if (!force && snapCache && Date.now() - snapCache.at < SNAP_TTL_MS) return snapCache.snap;
 
-  const [cf, gel, till, purex, linked, sameWeekRate, lagCurve] = await Promise.all([
+  const [cf, gel, till, purex, linked, sameWeekRate, lagCurve, mopex] = await Promise.all([
     getCashflow13Week(),
     getGelatoAr().catch(() => null as GelatoArResult | null),
     getTillerBalances().catch(() => null as TillerBalances | null),
@@ -111,6 +118,7 @@ export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
     getLinkedBalances().catch(() => null as LinkedBalances | null),
     getSameWeekCollectionRate().catch(() => 0.13),
     getCollectionLagCurve().catch(() => []),
+    getMonthlyOpex().catch(() => null),
   ]);
 
   const closing = cf.totals.closingCash;
@@ -143,6 +151,7 @@ export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
   const aging = { d0_30: 0, d31_60: 0, d61_90: 0, d90plus: 0, total: 0 };
   type ChaseAcc = { customer: string; open: number; collectible: number; daysOldest: number; usualPayDays: number | null; expectedWeek: number | null; invoices: number };
   const chaseMap = new Map<string, ChaseAcc>();
+  const invList: { invoiceNumber: string; customer: string; open: number; daysOut: number; status: string }[] = [];
   const todayMs = Date.parse(cf.asOf) || Date.now();
   if (arProj) {
     for (const p of arProj.placements) {
@@ -155,6 +164,7 @@ export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
       else if (daysOut <= 90) aging.d61_90 += open;
       else aging.d90plus += open;
       aging.total += open;
+      invList.push({ invoiceNumber: p.invoiceNumber, customer: p.customer, open: +open.toFixed(2), daysOut, status: p.status });
       const note = p.placements?.[0]?.targetMonth ?? '';
       const mm = note.match(/median\s+(\d+)\s*d/i);
       const median = mm ? Number(mm[1]) : null;
@@ -177,6 +187,20 @@ export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
     overdueBy: c.usualPayDays != null ? c.daysOldest - c.usualPayDays : null,
     expectedWeek: c.expectedWeek != null ? c.expectedWeek + 1 : null, invoices: c.invoices,
   })).sort((a, b) => b.collectible - a.collectible);
+  const invoiceList = invList.sort((a, b) => b.open - a.open).slice(0, 80);
+
+  // Sales insights (YoY + seasonality) - free from the forecast already loaded.
+  const sfx = cf.salesForecast;
+  const salesInsights = sfx ? {
+    yoy: (sfx.yearlyHistory ?? []).map((y, i, arr) => {
+      const prev = arr[i - 1];
+      return { year: y.year, total: +y.total.toFixed(2), growthPct: prev && prev.total > 0 ? +(((y.total - prev.total) / prev.total) * 100).toFixed(1) : null };
+    }),
+    seasonality: (sfx.seasonality ?? []).map((p) => ({ month: p.monthOfYear, index: p.index })),
+  } : null;
+
+  // Monthly OpEx (LT vs PureX) - last 12 months.
+  const monthlyOpex = (mopex?.rows ?? []).slice(-12).map((r) => ({ month: r.monthLabel, lt: +r.ltDirect.toFixed(2), purex: +r.purex.toFixed(2), total: +r.total.toFixed(2) }));
 
   const BUSINESS_CASH_RE = /crb indirect|7561|business mm|0910/i;
   const accounts = (till?.cashAccounts ?? [])
@@ -219,7 +243,9 @@ export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
       collectionDays: arProj?.globalAvgCollectionDays ?? 0,
       topCustomers,
     },
-    collections: { aging, chase },
+    collections: { aging, chase, invoiceList },
+    salesInsights,
+    monthlyOpex,
     scenarioData: {
       salesWeekly: (cf.inflows.find((l) => /sales.*forecast/i.test(l.label))?.values ?? cf.weeks.map(() => 0)),
       sameWeekRate: typeof sameWeekRate === 'number' && sameWeekRate > 0 ? sameWeekRate : 0.13,
@@ -1112,6 +1138,89 @@ const INTENTS: Intent[] = [
         title: `Here's how to strengthen cash over the next 13 weeks:`,
         lines,
         note: `Built live from your collections, expenses and weekly closing-cash numbers.`,
+      };
+    },
+  },
+  {
+    id: 'invoice_status',
+    phrases: ['invoice status', 'invoice number', 'status of invoice', 'invoice paid', 'is invoice paid', 'invoice age', 'how old is invoice', 'invoice overdue', 'check invoice', 'invoice detail', 'oldest invoice', 'specific invoice'],
+    keywords: ['invoice'],
+    handler: (s, n) => {
+      const list = s.collections.invoiceList;
+      if (list.length === 0) return { title: `No open invoices right now.`, lines: [`Everything's collected.`] };
+      const m = n.match(/\b([a-z]?\d{3,})\b/i);
+      if (m) {
+        const q = m[1].toLowerCase();
+        const hit = list.find((iv) => iv.invoiceNumber.toLowerCase().includes(q));
+        if (hit) {
+          const bucket = hit.daysOut <= 30 ? 'current' : hit.daysOut <= 60 ? 'past Net 30' : hit.daysOut <= 90 ? 'past Net 60' : 'past Net 90';
+          return {
+            title: `Invoice ${hit.invoiceNumber} - ${hit.customer}`,
+            lines: [
+              `Open: ${money(hit.open)} · ${hit.daysOut} days old (${bucket}) · status: ${hit.status || 'open'}`,
+              hit.daysOut > 30 ? `Overdue - worth chasing.` : `Still within terms.`,
+            ],
+            note: SOURCE.ar_lt,
+          };
+        }
+        return { title: `No open invoice matches "${m[1]}".`, lines: [`It may be paid, written off, or Gelato. Largest open invoices:`, ...list.slice(0, 6).map((iv) => `• ${iv.invoiceNumber} - ${iv.customer}: ${money(iv.open)} (${iv.daysOut}d)`)] };
+      }
+      const oldest = [...list].sort((a, b) => b.daysOut - a.daysOut).slice(0, 10);
+      return {
+        title: `Oldest open invoices (chase these first):`,
+        lines: oldest.map((iv) => `• ${iv.invoiceNumber} - ${iv.customer}: ${money(iv.open)}, ${iv.daysOut} days old`),
+        note: `Give me an invoice number for a specific one. ${SOURCE.ar_lt}`,
+      };
+    },
+  },
+  {
+    id: 'sales_yoy',
+    phrases: ['year over year', 'yoy', 'sales growth', 'last year vs', 'growth rate', 'sales 2024', 'sales 2025', 'sales 2026', 'annual sales', 'yearly sales', 'how much grew', 'sales badha kitna', 'sales kitna badha'],
+    keywords: ['yoy', 'yearly', 'annual'],
+    handler: (s) => {
+      if (!s.salesInsights || s.salesInsights.yoy.length === 0) return { title: `Year-over-year sales aren't loaded right now.`, lines: [`Give it a moment and ask again.`] };
+      return {
+        title: `Sales year-over-year:`,
+        lines: s.salesInsights.yoy.map((y) => `• ${y.year}: ${money(y.total)}${y.growthPct != null ? ` (${y.growthPct >= 0 ? '+' : ''}${y.growthPct}% vs prior year)` : ''}`),
+        note: `From the Sales History tab - the latest year is year-to-date.`,
+      };
+    },
+  },
+  {
+    id: 'seasonality',
+    phrases: ['seasonality', 'seasonal', 'which month best', 'best month', 'slow month', 'peak month', 'kaunsa month', 'month wise sales', 'busy month', 'strong month', 'weak month'],
+    keywords: ['seasonal', 'seasonality'],
+    handler: (s) => {
+      if (!s.salesInsights || s.salesInsights.seasonality.length === 0) return { title: `Seasonality isn't loaded right now.`, lines: [`Give it a moment and ask again.`] };
+      const MON = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const sorted = [...s.salesInsights.seasonality].sort((a, b) => b.index - a.index);
+      const top = sorted.slice(0, 3), bottom = sorted.slice(-3).reverse();
+      return {
+        title: `Sales seasonality (× vs an average month):`,
+        lines: [
+          `Strongest: ${top.map((x) => `${MON[x.month]} ${x.index.toFixed(2)}×`).join(', ')}`,
+          `Weakest: ${bottom.map((x) => `${MON[x.month]} ${x.index.toFixed(2)}×`).join(', ')}`,
+          `1.00× = average; above = busier, below = slower.`,
+        ],
+        note: `From 2024-2026 paid history (Sales History tab).`,
+      };
+    },
+  },
+  {
+    id: 'monthly_opex',
+    phrases: ['monthly opex', 'monthly expenses', 'opex per month', 'lt vs purex', 'monthly spend', 'mahine ka kharcha', 'per month expense', 'monthly cost', 'opex history', 'monthly burn history'],
+    keywords: ['opex'],
+    handler: (s) => {
+      if (!s.monthlyOpex || s.monthlyOpex.length === 0) return { title: `Monthly OpEx isn't loaded right now.`, lines: [`It's still pulling from QuickBooks - try again shortly.`] };
+      const recent = s.monthlyOpex.slice(-6);
+      const avg = recent.reduce((a, b) => a + b.total, 0) / recent.length;
+      return {
+        title: `Monthly OpEx (LT-direct + PureX-paid), last ${recent.length} months:`,
+        lines: [
+          ...recent.map((m) => `• ${m.month}: ${money(m.total)} (LT ${money(m.lt)} · PureX ${money(m.purex)})`),
+          `Average ${money(avg)}/month.`,
+        ],
+        note: `From the Monthly LT vs PureX OpEx view.`,
       };
     },
   },
