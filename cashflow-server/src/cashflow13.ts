@@ -957,7 +957,15 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // Lazy snapshot capture (actual view, future direction only): record this
  // Monday's plan so the Past Weeks view can later compute variance vs
  // actuals. Idempotent per Monday - second call same day is a no-op.
- if (opts.direction !== 'past') {
+ //
+ // Skip capture on a DEGRADED compute (a transient sheet/QB hiccup that zeroed
+ // Gelato AR / the AR projection / the sales forecast / expenses). Capture is
+ // first-write-wins per Monday, so a degraded first compute of the morning would
+ // otherwise LOCK IN an incomplete snapshot (e.g. only the Gelato line) as that
+ // week's frozen budget. Skipping lets the next healthy compute capture instead.
+ const captureDegraded = /expense fetch failed|gelato ar fetch failed|ar projection failed|sales forecast failed/i;
+ const snapshotHealthy = !warnings.some((w) => captureDegraded.test(w));
+ if (opts.direction !== 'past' && snapshotHealthy) {
  try {
  const snap: WeeklySnapshot = {
  monday: ymd(ANCHOR),

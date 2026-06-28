@@ -43,11 +43,14 @@ export async function getCashflow13WeekCached(direction: 'future' | 'past', forc
     (d) => {
       const r = d as { weeks?: unknown[]; warnings?: string[] };
       if (!Array.isArray(r.weeks) || r.weeks.length === 0) return false;
-      // Self-heal: never cache a result where the QB expense pull failed (all
-      // outflows would be zero, e.g. a transient token break). Retry next time
-      // so the outflow budget reappears the moment QB recovers, instead of a
-      // zero-outflow snapshot getting stuck for the 5-min TTL.
-      if (r.warnings?.some((w) => /expense fetch failed/i.test(w))) return false;
+      // Self-heal: never cache a DEGRADED compute - one where a transient sheet
+      // or QB hiccup zeroed a major budget component (outflows, Gelato AR, the AR
+      // projection, or the sales forecast). Caching it would freeze a wrong budget
+      // for the TTL, and because the durable cache is SHARED local<->prod it makes
+      // the two show wildly different numbers (e.g. Gelato $0 vs $554k). Reject so
+      // the last-GOOD value keeps serving until a fully-healthy recompute lands.
+      const degraded = /expense fetch failed|gelato ar fetch failed|ar projection failed|sales forecast failed/i;
+      if (r.warnings?.some((w) => degraded.test(w))) return false;
       return true;
     },
     force,
