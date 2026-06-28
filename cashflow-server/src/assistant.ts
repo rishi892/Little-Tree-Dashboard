@@ -951,6 +951,89 @@ const INTENTS: Intent[] = [
     },
   },
   {
+    // CFO-grade: "which invoice should I collect this week to fix my problem?"
+    // Don't just list receivables - find the tight week, size the gap, and name
+    // the SPECIFIC invoices to pull forward that cover it (and what cash that buys).
+    id: 'fix_with_collection',
+    phrases: [
+      'which invoice', 'which invoices', 'what invoice', 'kaun sa invoice', 'kaunsa invoice', 'kon sa invoice', 'konsa invoice',
+      'invoice to collect', 'invoice should i collect', 'collect this week', 'chase this week', 'invoice this week',
+      'solve my problem', 'fix my cash', 'fix the week', 'save the week', 'cover the gap', 'cover the shortfall', 'cover my shortfall',
+      'cash gap', 'shortfall', 'fix cash', 'problem solve', 'solve the problem', 'kaun sa invoice lu', 'kaun sa invoice loon',
+      'is week kaun', 'us week kaun', 'which to collect to', 'what should i collect to',
+    ],
+    keywords: ['shortfall', 'gap'],
+    handler: (s) => {
+      const closing = s.totals.closingCash;
+      if (!closing?.length) return { title: `I can't see the weekly cash yet.`, lines: [`Give the 13-week plan a moment to load and ask again.`] };
+      // 1) Find the week that needs help + the buffer to aim for.
+      let W = s.runway.negativeWeekIdx;
+      let target = 0;                      // negative week -> get back to $0
+      if (W == null) { W = s.runway.criticalWeekIdx; target = STATUS_CRITICAL; }  // tight week -> reach the safety buffer
+      const noCrunch = W == null;
+      if (W == null) W = s.runway.minClosingIdx;  // no crunch -> tightest week, for buffer-building
+      const have = closing[W] ?? 0;
+      const gap = Math.max(0, target - have);
+
+      // 2) Candidate invoices = money you can realistically PULL FORWARD into this
+      //    week: invoices from customers projected to pay AFTER the tight week, or
+      //    already past their own usual pay-timing (overdue). Those add NEW cash to
+      //    week W (collections projected on/before W are already in the closing
+      //    balance, so chasing them wouldn't change the number). Biggest first =
+      //    fewest calls to close the gap.
+      const norm = new Map(s.collections.chase.map((c) => [c.customer, c]));
+      const candidates = s.collections.invoiceList
+        .filter((iv) => {
+          const c = norm.get(iv.customer);
+          const overdue = c?.overdueBy != null && c.overdueBy > 5;
+          const expectedAfter = c?.expectedWeek != null && c.expectedWeek > W + 1;
+          return overdue || expectedAfter || iv.daysOut > 45;
+        })
+        .sort((a, b) => b.open - a.open);
+
+      if (candidates.length === 0) {
+        return {
+          title: noCrunch
+            ? `Good news - no cash crunch in the 13 weeks. The tightest week is ${weekName(s, W)} at ${money(have)}.`
+            : `${weekName(s, W)} is tight (${money(have)}), but there are no clearly pull-forward-able invoices right now.`,
+          lines: [`Everything open is already projected to land on/before that week, so it's baked into the number. The lever here is delaying an outflow (payroll/inventory timing) rather than a collection.`],
+        };
+      }
+
+      // 3) Greedily pick invoices until the gap is covered (or top few for buffer).
+      const picked: typeof candidates = [];
+      let acc = 0;
+      for (const iv of candidates) {
+        picked.push(iv);
+        acc += iv.open;
+        if (gap > 0 && acc >= gap) break;
+        if (gap === 0 && picked.length >= 6) break;
+      }
+      const lines = picked.slice(0, 8).map((iv) => {
+        const c = norm.get(iv.customer);
+        const why = c?.overdueBy != null && c.overdueBy > 5
+          ? `${c.overdueBy}d past their usual ${c.usualPayDays}d - overdue, call now`
+          : (c?.expectedWeek != null ? `not due till ~wk ${c.expectedWeek} - ask them to pay early` : `${iv.daysOut}d out`);
+        return `• #${iv.invoiceNumber} ${iv.customer}: ${money(iv.open)} (${why})`;
+      });
+      if (picked.length > 8) lines.push(`…and ${picked.length - 8} more (${money(acc - picked.slice(0, 8).reduce((t, iv) => t + iv.open, 0))})`);
+      const newCash = have + acc;
+
+      if (gap > 0) {
+        return {
+          title: `${weekName(s, W)} closes at ${money(have)} - short by ${money(gap)}. Collect these ${picked.length} invoice${picked.length > 1 ? 's' : ''} (${money(acc)}) to fix it:`,
+          lines,
+          note: `Pulling these in lifts ${weekName(s, W)} from ${money(have)} to about ${money(newCash)} - covers the ${money(gap)} gap with room to spare. Chosen because they're either overdue or projected AFTER that week (so collecting early adds real cash), biggest first = fewest calls.`,
+        };
+      }
+      return {
+        title: `Cash stays positive, but ${weekName(s, W)} is your tightest (${money(have)}). To build a buffer, pull in these overdue / not-yet-due invoices:`,
+        lines,
+        note: `These are the realistic levers to pull cash forward (${money(acc)} total). Collecting them would lift the tight week to about ${money(newCash)}.`,
+      };
+    },
+  },
+  {
     id: 'aging',
     phrases: ['aging', 'ageing', 'net 30', 'net 60', 'net 90', 'past due', 'overdue invoices', 'how overdue', 'kitne din se', 'kitne din ho gaye', 'days outstanding', 'invoices overdue', 'old invoices', 'invoice net', 'crossed net'],
     keywords: ['aging', 'ageing', 'overdue'],
@@ -1342,7 +1425,7 @@ const INTENTS: Intent[] = [
       lines: [
         `• Cash Flow - Current Position (cash, cards, Gelato AR, net liquidity), live Cash Flow KPIs, and the 13-Week Plan.`,
         `• Expenses - Combined / PureX / Moysh breakdowns, Monthly LT vs PureX, and Subscriptions.`,
-        `• Reports - LT P&L, Balance Sheet, Bank & Credit-Card transactions, Reconciliation, and Sales by Product.`,
+        `• Reports - LT P&L, Balance Sheet, and Bank & Credit-Card transactions.`,
         `• Upflow - your collections tool: invoices, reminders, replies, workflows and payments.`,
         `Ask me about any of these, or say "show me ..." and I'll walk you there.`,
       ],
@@ -1397,12 +1480,19 @@ export function routeQuestion(snap: FinancialSnapshot, question: string, user?: 
   // intent just because it contains the word "collections". Bias the scenario
   // handlers up when a magnitude is present so the live what-if maths runs.
   const hasMagnitude = extractScenario(n) != null || /\b(double|dugna|twice|2x|half|aadha)\b/.test(n);
+  // "collect/chase/invoice" + "fix/gap/problem/tight/cover/crunch/shortfall" is a
+  // CFO problem-solving ask ("which invoice fixes my tight week?"), not a plain
+  // list - steer it to the fix_with_collection handler that sizes the gap and
+  // names the specific invoices to pull forward.
+  const collectToFix = /\b(invoice|invoices|collect|chase|vasooli)\b/.test(n)
+    && /\b(fix|gap|shortfall|problem|solve|tight|tightest|cover|crunch|negative|short|red)\b/.test(n);
   let best: Intent | null = null, bestScore = 0;
   for (const intent of INTENTS) {
     let score = 0;
     for (const p of intent.phrases) if (n.includes(p)) score += 5 + p.length * 0.15;
     for (const k of intent.keywords) if (n.includes(' ' + k + ' ')) score += 2;
     if (hasMagnitude && (intent.id === 'sales_scenario' || intent.id === 'scenario')) score += 4;
+    if (collectToFix && intent.id === 'fix_with_collection') score += 6;
     if (score > bestScore) { bestScore = score; best = intent; }
   }
 
