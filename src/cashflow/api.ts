@@ -2007,6 +2007,10 @@ export type CollectedDetail = {
  start: string; end: string;
  nonGelato: { total: number; count: number; invoices: CollectedInvoice[] };
  gelato: { total: number; count: number; invoices: CollectedInvoice[] };
+ // Gross sales INVOICED over the full [start, end] window (by bill date) - the
+ // Variance "Little Tree Sales" REF actual uses this so it spans the whole
+ // month-to-date (incl. the in-progress week), not just the closed weeks.
+ salesInvoiced?: { gelato: { amount: number; invoiceCount: number }; nonGelato: { amount: number; invoiceCount: number }; total: number };
 };
 export async function fetchCollectedDetail(start: string, end: string): Promise<CollectedDetail> {
  const res = await fetch(`/api/collected-detail?start=${start}&end=${end}`);

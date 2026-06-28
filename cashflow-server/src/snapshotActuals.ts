@@ -175,6 +175,11 @@ export async function getCollectedDetail(start: string, end: string): Promise<{
  start: string; end: string;
  nonGelato: { total: number; count: number; invoices: InvoiceDetail[] };
  gelato: { total: number; count: number; invoices: InvoiceDetail[] };
+ // Sales INVOICED (gross, by bill date) over the SAME [start, end] window - so the
+ // Variance "Little Tree Sales" REF actual covers the full period (incl. the
+ // in-progress week), instead of only the complete closed weeks. This makes it
+ // match the month-to-date sales shown on the KPI / AR page.
+ salesInvoiced: WeekActuals['salesInvoiced'];
 }> {
  const ltFin = await getLtFinancialsSales();
  const ymd = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
@@ -193,10 +198,14 @@ export async function getCollectedDetail(start: string, end: string): Promise<{
   else { ng.push(d); ngT += inv.paid; }
  }
  ng.sort((a, b) => b.paid - a.paid); gel.sort((a, b) => b.paid - a.paid);
+ // Gross sales invoiced (by bill date) across the WHOLE window - the Variance
+ // sales actual reads this so it spans the full month-to-date, not just closed weeks.
+ const salesInvoiced = await getSalesInvoicedForWeek(start, end);
  return {
   start, end,
   nonGelato: { total: +ngT.toFixed(2), count: ng.length, invoices: ng },
   gelato: { total: +gT.toFixed(2), count: gel.length, invoices: gel },
+  salesInvoiced,
  };
 }
 

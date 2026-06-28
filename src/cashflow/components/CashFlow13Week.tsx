@@ -1719,7 +1719,14 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
  const actualIn = (lbl: string): number | null => {
   if (!detail) return null;
   if (/gelato/i.test(lbl)) return detail.gelato.total;
-  if (isDisplayOnlyInflow(lbl)) { let any = false, t = 0; for (const it of gridItems) if (it.actuals) { any = true; t += actualForInflowLine(lbl, it.actuals) ?? 0; } return any ? t : null; }
+  // Sales REF line: gross sales invoiced over the FULL period (incl. the
+  // in-progress week), straight from the collected-detail's salesInvoiced - so it
+  // matches the month-to-date sales on the KPI/AR page. Falls back to summing the
+  // closed weeks only if an older backend hasn't sent salesInvoiced yet.
+  if (isDisplayOnlyInflow(lbl)) {
+   if (detail.salesInvoiced) return detail.salesInvoiced.nonGelato.amount;
+   let any = false, t = 0; for (const it of gridItems) if (it.actuals) { any = true; t += actualForInflowLine(lbl, it.actuals) ?? 0; } return any ? t : null;
+  }
   if (/collected from sales|weekly cash|new sales/i.test(lbl)) return 0;   // folded into AR
   if (/past ar|little tree account|lag-curve|non-gelato/i.test(lbl)) return detail.nonGelato.total;
   return null;

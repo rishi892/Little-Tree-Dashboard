@@ -552,9 +552,10 @@ app.get('/api/combined-actual', async (req, res, next) => {
  if (!/^\d{4}-\d{2}$/.test(month)) { res.status(400).json({ error: 'month (YYYY-MM) required' }); return; }
  const force = req.query.refresh === '1';
  const { getCombinedActualForMonth } = await import('./combinedActual.js');
- // Durable-cached per month so the Variance tab serves instantly on serverless
- // (was a live QB + sheet recompute on every open).
- const { data } = await withDurableCache(`combined-actual:${month}`, 30 * 60 * 1000, () => getCombinedActualForMonth(month), (d) => d != null, force);
+ // Durable-cached per month so the Variance tab serves instantly on serverless,
+ // but with a short TTL (2 min) so sheet/QB actuals refresh "live" - the cache
+ // still serves last-good instantly while it revalidates in the background.
+ const { data } = await withDurableCache(`combined-actual:${month}`, 2 * 60 * 1000, () => getCombinedActualForMonth(month), (d) => d != null, force);
  res.json(data);
  } catch (err) { next(err); }
 });
@@ -725,9 +726,10 @@ app.get('/api/weekly-snapshots', async (_req, res, next) => {
 app.get('/api/past-weeks-grid', async (req, res, next) => {
  try {
   const force = req.query.refresh === '1';
-  // Durable-cached so the Past + Variance grid serves instantly on serverless
-  // (was a live snapshot + sheet-actuals + QB-weekly-expense recompute per open).
-  const { data, cached } = await withDurableCache('past-weeks-grid', 30 * 60 * 1000, async () => {
+  // Durable-cached so the Past + Variance grid serves instantly on serverless,
+  // but short TTL (2 min) so the sheet-sourced actuals (AR collected per week)
+  // stay "live" - serves last-good instantly while revalidating in the background.
+  const { data, cached } = await withDurableCache('past-weeks-grid', 2 * 60 * 1000, async () => {
   const { listSnapshots } = await import('./weeklySnapshots.js');
   const { getWeekActuals } = await import('./snapshotActuals.js');
   const { getWeeklyExpensesForWeeks, getExpectedInflowByWeek } = await import('./weeklyActuals.js');
@@ -796,9 +798,10 @@ app.delete('/api/weekly-snapshots/:monday', async (req, res, next) => {
 app.get('/api/current-month-overview', async (req, res, next) => {
  try {
   const force = req.query.refresh === '1';
-  // Durable-cached so the Actuals tab serves instantly on serverless (was a live
-  // sales-forecast + AR-projection + Gelato recompute on every open).
-  const { data, cached } = await withDurableCache('current-month-overview', 15 * 60 * 1000, async () => {
+  // Durable-cached so the Actuals tab serves instantly on serverless, but short
+  // TTL (2 min) so the sheet-sourced sales + AR actuals stay "live" - serves
+  // last-good instantly while revalidating in the background.
+  const { data, cached } = await withDurableCache('current-month-overview', 2 * 60 * 1000, async () => {
   const { getArActualsForWeek, getSalesInvoicedForWeek, getOpenArAsOf } = await import('./snapshotActuals.js');
   const { getSalesForecast } = await import('./salesForecast.js');
   const { getArProjection } = await import('./arProjection.js');
@@ -1033,7 +1036,10 @@ app.get('/api/tiller/balances', async (req, res, next) => {
 
 // Linked accounts - QB chart of accounts (what to show) × Tiller balances (the $).
 // Served through the durable Supabase cache so a QB hiccup never breaks the page.
-const LINKED_TTL_MS = 30 * 60 * 1000;
+// Short TTL (2 min) so the Current Position cash (Tiller-sheet balances) stays
+// "live" - it serves last-good instantly and revalidates in the background, and
+// the QB account list it pulls is itself coalesced/cached (~60s) so this is cheap.
+const LINKED_TTL_MS = 2 * 60 * 1000;
 // A result is "good" (worth caching) only when QB actually returned accounts and
 // there's no auth warning. A degraded result never overwrites the last good one.
 const isGoodLinked = (d: LinkedBalances): boolean =>
@@ -1287,7 +1293,9 @@ app.get('/api/sales-by-channel', async (req, res, next) => {
 // AR live ledger - fetched from the user's invoice Google Sheet.
 // Little Tree open AR. Durable-cached (Supabase) so a serverless cold start
 // serves last-good instantly instead of re-scraping the sheet on every poll.
-const AR_TTL_MS = 5 * 60 * 1000;
+// Short TTL (60s) so sheet edits (new/paid invoices) show up "live" - the
+// stale-while-revalidate cache still serves instantly, this just refreshes sooner.
+const AR_TTL_MS = 60 * 1000;
 const isGoodAr = (d: ArResult): boolean => d != null && d.totals != null;
 const getArOpenCached = (force = false) =>
   withDurableCache('ar-open', AR_TTL_MS, getArOpen, isGoodAr, force);
@@ -1321,7 +1329,8 @@ app.get('/api/expenses-mapped', async (req, res, next) => {
 
 // Gelato AR - live from the Gelato Sales / Batches Google Sheet. Durable-cached
 // so a serverless cold start serves last-good instantly (no re-scrape per poll).
-const GELATO_TTL_MS = 5 * 60 * 1000;
+// Short TTL (60s) so sheet edits surface "live".
+const GELATO_TTL_MS = 60 * 1000;
 const isGoodGelato = (d: GelatoArResult): boolean => d != null && d.totals != null;
 const getGelatoArCached = (force = false) =>
   withDurableCache('gelato-ar', GELATO_TTL_MS, getGelatoAr, isGoodGelato, force);
