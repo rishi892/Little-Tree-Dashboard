@@ -10,7 +10,8 @@
  * asking (CEO Joey / CFO Rishi) and addresses them by name.
  */
 
-import { getCashflow13Week, type CashflowResult, type CashflowLine } from './cashflow13.js';
+import { type CashflowResult, type CashflowLine } from './cashflow13.js';
+import { getCashflow13WeekCached } from './cashflow13Cache.js';
 import { getGelatoAr, type GelatoArResult } from './gelatoAr.js';
 import { getTillerBalances, type TillerBalances } from './tiller.js';
 import { getPurexClearing, type PurexClearingResult } from './purexClearing.js';
@@ -111,7 +112,7 @@ export async function buildSnapshot(force = false): Promise<FinancialSnapshot> {
   if (!force && snapCache && Date.now() - snapCache.at < SNAP_TTL_MS) return snapCache.snap;
 
   const [cf, gel, till, purex, linked, sameWeekRate, lagCurve, mopex] = await Promise.all([
-    getCashflow13Week(),
+    getCashflow13WeekCached('future').then((r) => r.data),
     getGelatoAr().catch(() => null as GelatoArResult | null),
     getTillerBalances().catch(() => null as TillerBalances | null),
     getPurexClearing().catch(() => null as PurexClearingResult | null),
@@ -1415,11 +1416,17 @@ const SUGGESTIONS = [
 
 export function routeQuestion(snap: FinancialSnapshot, question: string, user?: User): AssistantAnswer {
   const n = norm(question);
+  // A magnitude ("up 20%", "drop 15%", "double", "half") signals a what-if, not a
+  // plain info lookup. Without this, "if sales go up 20%" loses to the `inflow`
+  // intent just because it contains the word "collections". Bias the scenario
+  // handlers up when a magnitude is present so the live what-if maths runs.
+  const hasMagnitude = extractScenario(n) != null || /\b(double|dugna|twice|2x|half|aadha)\b/.test(n);
   let best: Intent | null = null, bestScore = 0;
   for (const intent of INTENTS) {
     let score = 0;
     for (const p of intent.phrases) if (n.includes(p)) score += 5 + p.length * 0.15;
     for (const k of intent.keywords) if (n.includes(' ' + k + ' ')) score += 2;
+    if (hasMagnitude && (intent.id === 'sales_scenario' || intent.id === 'scenario')) score += 4;
     if (score > bestScore) { bestScore = score; best = intent; }
   }
 

@@ -11,7 +11,7 @@ import { getDashboardData } from './qbo.js';
 import { getCachedSubscriptionAudit, invalidateSubscriptionAuditCache } from './audit.js';
 import { getExpenseDetail, type ExpenseDetailResult } from './expenseDetail.js';
 import { detectRecurringSubscriptions, type RecurringResult } from './recurring.js';
-import { getCashflow13Week, type CashflowResult } from './cashflow13.js';
+import { getCashflow13WeekCached } from './cashflow13Cache.js';
 import { getCurrentPosition } from './currentPosition.js';
 import { getTillerBalances, type TillerBalances } from './tiller.js';
 import { getLinkedBalances, type LinkedBalances } from './linkedAccounts.js';
@@ -334,44 +334,9 @@ app.get('/api/expense-detail', async (req, res, next) => {
 
 // 13-week is durable-cached (5 min, stale-while-revalidate): outflows come from
 // the shared cached expense source, inflows from the live sheet.
-// Fingerprint the cashflow cell-edits so an edit busts the cache: when the owner
-// edits a sales week, the backend re-folds it into the same-week + lagged-AR
-// split, so the cached result must refresh (the logic keeps running on the edit).
-async function cashflowEditsFingerprint(): Promise<string> {
- try {
- const { loadCashflowEdits } = await import('./cashflowEdits.js');
- const edits = await loadCashflowEdits();
- const keys = Object.keys(edits).sort();
- let h = 5381;
- for (const k of keys) {
- const s = `${k}:${edits[k].value}:${edits[k].at ?? ''}`;
- for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
- }
- return `${keys.length}-${h.toString(36)}`;
- } catch { return '0'; }
-}
-
-const getCashflow13WeekCached = async (direction: 'future' | 'past', force = false) => {
- // v6: cache key carries an edits fingerprint (future) so a sales edit re-flows
- // the same-week + lagged-AR split immediately instead of after the 5-min TTL.
- const fp = direction === 'future' ? await cashflowEditsFingerprint() : '0';
- return withDurableCache(
- `cashflow-13week:v6:${direction}:${fp}`,
- 5 * 60 * 1000,
- () => getCashflow13Week(direction === 'past' ? { direction: 'past' } : undefined),
- (d) => {
- const r = d as { weeks?: unknown[]; warnings?: string[] };
- if (!Array.isArray(r.weeks) || r.weeks.length === 0) return false;
- // Self-heal: never cache a result where the QB expense pull failed (all
- // outflows would be zero, e.g. a transient token break). Retry next time
- // so the outflow budget reappears the moment QB recovers, instead of a
- // zero-outflow snapshot getting stuck for the 5-min TTL.
- if (r.warnings?.some((w) => /expense fetch failed/i.test(w))) return false;
- return true;
- },
- force,
- );
-};
+// The durable-cached 13-week accessor lives in cashflow13Cache.ts so the bot's
+// snapshot (assistant.ts) reads the SAME last-good result instead of recomputing
+// the heavy 13-week from scratch on every cold serverless instance.
 
 app.get('/api/cashflow-13week', async (req, res, next) => {
  try {
