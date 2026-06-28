@@ -371,6 +371,29 @@ app.get('/api/assistant/snapshot', async (req, res, next) => {
  } catch (err) { next(err); }
 });
 
+// AR Copilot - the AR Dashboard's own deterministic (no-LLM) question answerer.
+// Separate snapshot (open AR / aging / collections / sales), separate from the
+// Cashflow CFO Copilot above. Sheet-based, so no QB-token load.
+app.post('/api/ar-assistant', async (req, res, next) => {
+ try {
+ const { askArAssistant } = await import('./arAssistant.js');
+ const question = String(req.body?.question ?? req.body?.q ?? '').slice(0, 500).trim();
+ if (!question) { res.status(400).json({ error: 'Missing question' }); return; }
+ const u = req.body?.user;
+ const user = u && typeof u === 'object'
+ ? { name: String(u.name ?? '').slice(0, 60), title: String(u.title ?? '').slice(0, 40) }
+ : undefined;
+ res.json(await askArAssistant(question, user));
+ } catch (err) { next(err); }
+});
+
+app.get('/api/ar-assistant/snapshot', async (req, res, next) => {
+ try {
+ const { buildArSnapshot } = await import('./arAssistant.js');
+ res.json(await buildArSnapshot(req.query.refresh === '1'));
+ } catch (err) { next(err); }
+});
+
 // What changed since `since` (or since ~24h ago). The bot tracks this on its
 // own; the UI calls this on open to greet the user with recent movements.
 app.get('/api/assistant/changes', async (req, res, next) => {

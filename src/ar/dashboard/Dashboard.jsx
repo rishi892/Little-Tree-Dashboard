@@ -11,6 +11,7 @@ import Reviews from './pages/Reviews.jsx'
 import CustomerProfile from './CustomerProfile.jsx'
 import InvoiceListModal from './InvoiceListModal.jsx'
 import CustomerReviewList from './CustomerReviewList.jsx'
+import { ArCopilot } from './ArCopilot.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import LoadingSkeleton from './LoadingSkeleton.jsx'
 import { NavProvider, useNav } from '../lib/navigation.jsx'
@@ -219,6 +220,7 @@ function GlobalModals({ data, book, gelatoBrandMode = false, rawGelato = [] }) {
         ? <GelatoBrandDrillModal brand={customerVendor} gelato={rawGelato} onClose={closeCustomer} />
         : <CustomerProfile data={data} vendor={customerVendor} book={book} onClose={closeCustomer} />
       )}
+      <ArCopilot />
     </>
   )
 }
