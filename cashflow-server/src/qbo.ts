@@ -268,8 +268,12 @@ export async function getDashboardData(monthsBack = 12): Promise<DashboardData> 
  const runwayMonths = avgMonthlyBurn > 0 && currentCash > 0 ? currentCash / avgMonthlyBurn : null;
 
  // Cash-on-hand line items (sum to currentCash): the SAME 4 accounts the KPI uses.
+ // Use the AVAILABLE balance (cash in hand, net of pending holds) for each bank
+ // line so the breakdown sums EXACTLY to currentCash - which itself is built from
+ // available balances (cih above). Showing ledger here made a bank line ($29,569)
+ // disagree with its contribution to the total ($20,569 available).
  const cashBreakdown: BreakdownItem[] = [
- ...(tillerBalances?.accounts ?? []).map((a) => ({ label: a.name, value: +a.balance.toFixed(2) })),
+ ...(tillerBalances?.accounts ?? []).map((a) => ({ label: a.name, value: +(a.balanceAvailable != null ? a.balanceAvailable : a.balance).toFixed(2) })),
  { label: 'PureX bank (QB)', value: pureXBank },
  { label: 'Due From PureX / Gelato', value: dueFromPurex },
  ];
