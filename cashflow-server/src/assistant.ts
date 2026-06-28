@@ -505,12 +505,79 @@ function extractScenario(n: string): number | null {
   return -mag;
 }
 
+/** Pull a dollar amount out of a question: "$50,000", "50k", "1.5m", "50000",
+ *  "2 lakh". Returns null if there's no number. Used by the affordability check. */
+function extractAmount(n: string): number | null {
+  // \b after the unit so the "m" in "machine" / "k" in "kit" isn't read as a
+  // magnitude (else "20000 machine" → 20 billion).
+  const m = n.match(/\$?\s*([\d][\d,]*(?:\.\d+)?)\s*(k|m|thousand|million|lakh|lac|cr|crore)?\b/i);
+  if (!m) return null;
+  let v = Number(m[1].replace(/,/g, ''));
+  if (!Number.isFinite(v) || v <= 0) return null;
+  const unit = (m[2] || '').toLowerCase();
+  if (unit === 'k' || unit === 'thousand') v *= 1e3;
+  else if (unit === 'm' || unit === 'million') v *= 1e6;
+  else if (unit === 'lakh' || unit === 'lac') v *= 1e5;
+  else if (unit === 'cr' || unit === 'crore') v *= 1e7;
+  return v;
+}
+
+/** The CFO briefing: the whole cash picture in decision terms, 100% from the
+ *  snapshot (no invented numbers). The dashboard exists to drive cashflow
+ *  decisions, so this leads with the situation and the ONE thing to do next.
+ *  Reused by the `cfo_briefing` intent AND the fallback, so any unmatched
+ *  question still gets a grounded, useful answer instead of a dead-end. */
+function cfoBriefing(s: FinancialSnapshot, user?: User): Answer {
+  const fn = firstName(user);
+  const tail = s.totals.closingCash[s.totals.closingCash.length - 1] ?? 0;
+  const topOut = s.outflows.map((l) => ({ label: l.label, t: l.values.reduce((a, b) => a + b, 0) }))
+    .sort((a, b) => b.t - a.t)[0];
+  const lines: string[] = [
+    `Cash on hand: ${money(s.cash.openingCash)} (net ${money(s.cash.netCash)} after ${money(s.cash.ccDebt)} card debt).`,
+    `Next 13 weeks: ${money(s.inflow13w)} in, ${money(s.outflow13w)} out, net ${money(s.net13w)}.`,
+  ];
+  if (topOut) lines.push(`Biggest outflow: ${topOut.label} at ${money(topOut.t)}.`);
+
+  let title: string, action: string;
+  if (s.runway.negativeWeekIdx != null) {
+    const W = s.runway.negativeWeekIdx;
+    const gap = Math.max(0, -(s.totals.closingCash[W] ?? 0));
+    title = `${fn ? fn + ', ' : ''}cash goes negative around ${weekName(s, W)} - that's the thing to fix.`;
+    lines.push(`Low point: ${money(s.runway.minClosing)} at ${weekName(s, s.runway.minClosingIdx)}.`);
+    // The ONE decision: pull forward the biggest realistically-collectable invoice(s).
+    const norm = new Map(s.collections.chase.map((c) => [c.customer, c]));
+    const pull = s.collections.invoiceList.filter((iv) => {
+      const c = norm.get(iv.customer);
+      return (c?.overdueBy != null && c.overdueBy > 5) || (c?.expectedWeek != null && c.expectedWeek > W + 1) || iv.daysOut > 45;
+    }).sort((a, b) => b.open - a.open);
+    if (pull.length && gap > 0) {
+      let acc = 0; const names: string[] = [];
+      for (const iv of pull) { acc += iv.open; names.push(`#${iv.invoiceNumber} ${iv.customer} (${money(iv.open)})`); if (acc >= gap) break; }
+      action = `DO THIS: chase ${names.slice(0, 3).join(', ')} - ~${money(acc)} pulled in covers the ${money(gap)} gap. Ask "which invoice to collect this week" for the full list.`;
+    } else {
+      action = `DO THIS: delay a large outflow (inventory/payroll timing) before ${weekName(s, W)}, or accelerate collections - ask "how do I save cash".`;
+    }
+  } else if (s.runway.criticalWeekIdx != null) {
+    title = `${fn ? fn + ', ' : ''}cash stays positive but gets tight around ${weekName(s, s.runway.criticalWeekIdx)} (low ${money(s.runway.minClosing)}).`;
+    action = `DO THIS: keep collections moving so the tight week doesn't slip - ask "who should I chase".`;
+  } else {
+    title = `${fn ? fn + ', ' : ''}you're in good shape - cash stays positive all 13 weeks, ending ${money(tail)}.`;
+    lines.push(`Tightest week never drops below ${money(s.runway.minClosing)}.`);
+    action = `Room to invest, but watch ${topOut ? topOut.label : 'your biggest costs'}. Ask "can I afford $X" to test a spend.`;
+  }
+  lines.push(action);
+  return { title, lines, note: `Every number here is live from your 13-week cashflow - cash, collections and outflows. Ask anything specific and I'll answer from the data.` };
+}
+
 type Intent = {
   id: string;
   phrases: string[];
   keywords: string[];
   location?: NavTarget;
-  handler: (snap: FinancialSnapshot, n: string, user?: User) => Answer;
+  // `n` is the normalised question (lowercased, punctuation→spaces); `raw` is the
+  // original text - use it when punctuation matters (e.g. "$1.5m" amounts, which
+  // norm would split into "1 5m").
+  handler: (snap: FinancialSnapshot, n: string, user?: User, raw?: string) => Answer;
 };
 
 function findExpenseRow(snap: FinancialSnapshot, n: string) {
@@ -1417,6 +1484,69 @@ const INTENTS: Intent[] = [
     }),
   },
   {
+    // The dashboard's whole purpose is to drive cashflow decisions - this is the
+    // CFO briefing: the situation + the ONE thing to do next, all from live data.
+    id: 'cfo_briefing',
+    phrases: [
+      'how are we doing', 'how is the business', 'how is cash', 'how is it looking', 'how do we look', 'where do we stand',
+      'should i worry', 'are we ok', 'are we okay', 'are we fine', 'are we in trouble', 'any red flags', 'biggest risk', 'whats the risk',
+      'big picture', 'full picture', 'the picture', 'bottom line', 'overall', 'overview', 'summary', 'sum up', 'brief me', 'briefing', 'tldr',
+      'what should i do', 'what do i do', 'what should i focus', 'what matters', 'whats important', 'health check', 'state of the business',
+      'tell me everything', 'kya haal', 'kaisa chal raha', 'sab theek', 'main kya karu', 'kya karna chahiye', 'kya dhyan',
+    ],
+    keywords: ['briefing', 'overall', 'summary'],
+    handler: (s, _n, user) => cfoBriefing(s, user),
+  },
+  {
+    // Affordability decision: "can I afford / spend $X?" - test a one-off spend
+    // against the tightest week, purely from the data.
+    id: 'can_afford',
+    phrases: [
+      'can i afford', 'can we afford', 'afford to', 'can i spend', 'can we spend', 'can i pay', 'can i buy', 'should i buy',
+      'do i have room', 'room to spend', 'can i invest', 'can i take out', 'can i withdraw', 'can i pull out', 'is it safe to spend',
+      'kya kharch kar', 'kya le sakta', 'paisa nikal', 'afford kar',
+    ],
+    keywords: ['afford'],
+    handler: (s, n, _user, raw) => {
+      const amt = extractAmount(raw ?? n);
+      if (amt == null) {
+        return { title: `How much are you thinking of spending?`, lines: [`Tell me an amount - e.g. "can I afford $50k" - and I'll check it against your tightest week so you don't dip into the red.`] };
+      }
+      // A one-off spend now lowers EVERY week's closing cash by that amount.
+      const newMin = s.runway.minClosing - amt;
+      const W = s.runway.minClosingIdx;
+      const buffer = STATUS_CRITICAL;
+      if (newMin >= buffer) {
+        return {
+          title: `Yes - you can afford ${money(amt)}.`,
+          lines: [
+            `After spending it, your tightest week (${weekName(s, W)}) still closes at ${money(newMin)} - above the ${money(buffer)} comfort buffer.`,
+            `Cash on hand today is ${money(s.cash.openingCash)}.`,
+          ],
+          note: `Tests the spend as a one-off today against the lowest point in your 13-week plan.`,
+        };
+      }
+      if (newMin >= 0) {
+        return {
+          title: `Tight - ${money(amt)} is doable but risky.`,
+          lines: [
+            `It would pull your tightest week (${weekName(s, W)}) down to ${money(newMin)} - positive, but under the ${money(buffer)} safety buffer.`,
+            `Safer if you first pull in collections - ask "which invoice to collect this week".`,
+          ],
+          note: `One-off spend tested against the lowest point in the 13-week plan.`,
+        };
+      }
+      return {
+        title: `Not safely - ${money(amt)} would push you into the red.`,
+        lines: [
+          `Your tightest week (${weekName(s, W)}) is ${money(s.runway.minClosing)} now; spending ${money(amt)} drops it to ${money(newMin)}.`,
+          `You'd need to bring in about ${money(Math.abs(newMin))} first - ask "which invoice to collect this week" for the fastest way.`,
+        ],
+        note: `One-off spend tested against the lowest point in the 13-week plan.`,
+      };
+    },
+  },
+  {
     id: 'dashboard_tour',
     phrases: ['what can you show', 'what is in the dashboard', 'whats in the dashboard', 'dashboard overview', 'show me everything', 'what sections', 'what tabs', 'whole dashboard', 'give me a tour', 'what pages', 'navigate the dashboard', 'poora dashboard', 'kya kya hai dashboard'],
     keywords: ['tour'],
@@ -1511,19 +1641,23 @@ export function routeQuestion(snap: FinancialSnapshot, question: string, user?: 
         suggestions: SUGGESTIONS.slice(0, 4),
       };
     }
-    const fn = firstName(user);
+    // No specific match → DON'T dead-end with "didn't catch that". The dashboard
+    // is for cashflow decisions, so give the live CFO briefing (100% from data)
+    // and point to specifics. Never invent - the briefing only reads the snapshot.
+    const brief = cfoBriefing(snap, user);
     return {
-      intent: 'fallback',
-      confidence: 0,
-      title: `${fn ? fn + ', I' : 'I'} didn't quite catch that one.`,
-      lines: [`I answer from your live cashflow numbers. Try one of these, or rephrase:`, ...SUGGESTIONS.map((x) => `• ${x}`)],
+      intent: 'fallback_briefing',
+      confidence: 0.4,
+      title: brief.title,
+      lines: [...brief.lines, `(Ask me anything specific - cash, runway, who to chase, a what-if, "can I afford $X", an invoice, an expense.)`],
+      note: brief.note,
       suggestions: SUGGESTIONS.slice(0, 4),
     };
   }
 
   let ans: Answer;
   try {
-    ans = best.handler(snap, n, user);
+    ans = best.handler(snap, n, user, question);
   } catch (e) {
     ans = { title: `I hit a snag reading that.`, lines: [`The data may still be loading - give it a moment and ask again.`], note: e instanceof Error ? e.message : undefined };
   }
