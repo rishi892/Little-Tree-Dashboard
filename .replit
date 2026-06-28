@@ -10,7 +10,13 @@ modules = ["nodejs-20"]
 channel = "stable-23_11"
 
 [deployment]
-deploymentTarget = "cloudrun"
+# Reserved VM = always-on (GCE-backed). Required so the persistent process keeps
+# running with NOBODY on the dashboard: the in-process warmers (prewarmSheetCaches
+# every 90s, prewarmQbCaches every 30 min) and the QB-token keep-alive only run on
+# a long-lived host. "cloudrun" (Autoscale) sleeps when idle -> cold starts and
+# the auto-refresh/token keep-alive die, which is why Autoscale felt imperfect.
+# When you pick "Reserved VM" in the Replit Deployments UI it sets this for you.
+deploymentTarget = "gce"
 # Build the frontend bundles + compile the server, then start it.
 build = ["sh", "-c", "npm run install:all && npm run build:all"]
 run   = ["sh", "-c", "npm start"]
