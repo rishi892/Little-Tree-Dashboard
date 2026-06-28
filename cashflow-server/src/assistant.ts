@@ -394,8 +394,6 @@ const LOC: Record<string, NavTarget> = {
   balanceSheet: { view: 'reports', tab: 'bs',             anchor: 'reports-tabs',  where: 'Reports tab → "Balance Sheet"' },
   bankTxns:     { view: 'reports', tab: 'bank',           anchor: 'reports-tabs',  where: 'Reports tab → "Bank Transactions"' },
   ccTxns:       { view: 'reports', tab: 'cc',             anchor: 'reports-tabs',  where: 'Reports tab → "Credit Card Transactions"' },
-  reconciliation:{ view: 'reports', tab: 'reco',          anchor: 'reports-tabs',  where: 'Reports tab → "Reconciliation"' },
-  salesByProduct:{ view: 'reports', tab: 'salesByProduct',anchor: 'reports-tabs',  where: 'Reports tab → "Sales by Product"' },
   // Upflow view (collections / dunning)
   upflow:        { view: 'upflow', tab: 'overview',       anchor: 'upflow-tabs',   where: 'Upflow tab → "Overview"' },
   upflowInvoices:{ view: 'upflow', tab: 'invoices',       anchor: 'upflow-tabs',   where: 'Upflow tab → "Invoices"' },
@@ -428,8 +426,6 @@ const INTENT_LOCATION: Record<string, NavTarget> = {
   balance_sheet: LOC.balanceSheet,
   bank_transactions: LOC.bankTxns,
   cc_transactions: LOC.ccTxns,
-  reconciliation: LOC.reconciliation,
-  sales_by_product: LOC.salesByProduct,
   upflow: LOC.upflow,
 };
 
@@ -1322,26 +1318,6 @@ const INTENTS: Intent[] = [
       title: `Every credit-card transaction is on the Reports tab.`,
       lines: [`All charges across your corporate cards, live from Tiller - under "Credit Card Transactions".`],
       note: `Reports tab → "Credit Card Transactions".`,
-    }),
-  },
-  {
-    id: 'reconciliation',
-    phrases: ['reconciliation', 'reconcile', 'qb vs tiller', 'books vs bank', 'reco', 'matching transactions', 'does it reconcile'],
-    keywords: ['reconcile', 'reconciliation', 'reco'],
-    handler: () => ({
-      title: `The QuickBooks vs Tiller reconciliation is on the Reports tab.`,
-      lines: [`It matches your books (QuickBooks) against the bank (Tiller) so you can spot anything that doesn't line up.`],
-      note: `Reports tab → "Reconciliation".`,
-    }),
-  },
-  {
-    id: 'sales_by_product',
-    phrases: ['sales by product', 'product sales', 'which product sells', 'top products', 'best selling', 'sales per product', 'best product'],
-    keywords: ['product', 'products'],
-    handler: () => ({
-      title: `Sales broken down by product is on the Reports tab.`,
-      lines: [`See which products drive your revenue - under "Sales by Product".`],
-      note: `Reports tab → "Sales by Product".`,
     }),
   },
   {

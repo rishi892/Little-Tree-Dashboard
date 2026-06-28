@@ -39,34 +39,35 @@ export function ExpensesHub() {
  ))}
  </div>
 
- {/* All tabs always mounted (display:none for hidden) so data persists
- across tab switches - no re-fetch / loading flash. */}
- <div style={{ display: tab === 'monthly' ? 'block' : 'none' }}><MonthlySummary /></div>
- <div style={{ display: tab === 'combined' ? 'block' : 'none' }}>
+ {/* Lazy-mount: render ONLY the active tab so opening Expenses fetches just one
+ tab's data instead of firing all five (Combined/PureX/Moysh are each a separate
+ QB pull). The durable cache makes switching back near-instant. */}
+ {tab === 'monthly' && <MonthlySummary />}
+ {tab === 'combined' && (
  <MappedExpensesPage
  entity="Combined"
  title="Combined (PureX + Moysh)"
  subtitle="Sheet category layout · combined PureX + Moysh totals"
  totalLabel="COMBINED TOTAL"
  />
- </div>
- <div style={{ display: tab === 'purex' ? 'block' : 'none' }}>
+ )}
+ {tab === 'purex' && (
  <MappedExpensesPage
  entity="PureX"
  title="PureX"
  subtitle="QB Live · transactions paid from the PureX bank account"
  totalLabel="PUREX TOTAL"
  />
- </div>
- <div style={{ display: tab === 'moysh' ? 'block' : 'none' }}>
+ )}
+ {tab === 'moysh' && (
  <MappedExpensesPage
  entity="Moysh"
  title="Moysh (Other)"
  subtitle="Sheet category layout · only Moysh-paid amounts"
  totalLabel="MOYSH (OTHER) TOTAL"
  />
- </div>
- <div style={{ display: tab === 'mapping' ? 'block' : 'none' }}><PnlMappingPage /></div>
+ )}
+ {tab === 'mapping' && <PnlMappingPage />}
  </>
  );
 }

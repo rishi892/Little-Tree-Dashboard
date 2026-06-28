@@ -17,7 +17,7 @@ const TAB_LABEL: Record<string, string> = {
   // Expenses
   monthly: 'Monthly LT vs PureX', combined: 'Combined', purex: 'PureX', moysh: 'Moysh', subscriptions: 'Subscriptions',
   // Reports
-  pl: 'LT P&L', bs: 'Balance Sheet', bank: 'Bank Transactions', cc: 'Credit Card Transactions', reco: 'Reconciliation', salesByProduct: 'Sales by Product',
+  pl: 'LT P&L', bs: 'Balance Sheet', bank: 'Bank Transactions', cc: 'Credit Card Transactions',
   // Upflow
   overview: 'Overview', invoices: 'Invoices', customers: 'Customers', reminders: 'Reminders', replies: 'Replies', workflows: 'Workflows', payments: 'Payments', users: 'Team',
 };

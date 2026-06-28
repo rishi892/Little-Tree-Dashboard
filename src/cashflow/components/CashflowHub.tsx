@@ -38,9 +38,12 @@ export function CashflowHub({ dashboardSlot }: Props) {
         ))}
       </div>
 
-      <div style={{ display: tab === 'position' ? 'block' : 'none' }}><CurrentPosition /></div>
-      <div style={{ display: tab === 'dashboard' ? 'block' : 'none' }}>{dashboardSlot}</div>
-      <div style={{ display: tab === 'cashflow13' ? 'block' : 'none' }}><CashFlow13Week /></div>
+      {/* Lazy-mount: only the active tab fetches, so landing fires one tab's API
+          calls (default Current Position) instead of all three at once. The
+          durable cache makes switching back near-instant. */}
+      {tab === 'position' && <CurrentPosition />}
+      {tab === 'dashboard' && dashboardSlot}
+      {tab === 'cashflow13' && <CashFlow13Week />}
     </>
   );
 }
