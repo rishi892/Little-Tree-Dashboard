@@ -56,6 +56,9 @@ export type ArSnapshot = {
     topCustomers: { customer: string; total: number; count: number; lastMonth: string | null }[];
     cooling: { customer: string; prior3Total: number; lastMonth: string | null }[];
     byRep: { rep: string; total: number; count: number; top: string }[];
+    channels: { channel: string; total: number }[];
+    yoy: { currYTD: number; prevYTD: number; rate: number; currYear: string; prevYear: string; monthsCompared: number } | null;
+    yearly: { year: string; total: number; yoyPct: number | null }[];
   };
   warnings: string[];
 };
@@ -131,6 +134,9 @@ export async function buildArSnapshot(force = false): Promise<ArSnapshot> {
       topCustomers: (channel?.topCustomers ?? []).slice(0, 12).map((c) => ({ customer: c.customer, total: c.total, count: c.invoiceCount, lastMonth: c.lastInvoiceMonth })),
       cooling: (channel?.coolingCustomers ?? []).slice(0, 12).map((c) => ({ customer: c.customer, prior3Total: c.prior3Total, lastMonth: c.lastInvoiceMonth })),
       byRep: (reps?.rows ?? []).slice(0, 12).map((r) => ({ rep: r.rep, total: r.total + (r.predictedTotal ?? 0), count: r.invoiceCount, top: r.topCustomers?.[0]?.customer ?? '' })),
+      channels: (channel?.rows ?? []).map((r) => ({ channel: r.channel, total: r.total })).filter((c) => c.total > 0).sort((a, b) => b.total - a.total).slice(0, 10),
+      yoy: reps?.totals?.yoyTrend ? { currYTD: reps.totals.yoyTrend.currYTD, prevYTD: reps.totals.yoyTrend.prevYTD, rate: reps.totals.yoyTrend.rawRate, currYear: reps.totals.yoyTrend.currYearLabel, prevYear: reps.totals.yoyTrend.prevYearLabel, monthsCompared: reps.totals.yoyTrend.monthsCompared } : null,
+      yearly: (reps?.totals?.yearly ?? []).map((y) => ({ year: y.year, total: y.total, yoyPct: y.yoyPct })),
     },
     warnings,
   };
@@ -373,7 +379,120 @@ const INTENTS: Intent[] = [
       };
     },
   },
+  {
+    // "ye invoice 60+/90+ ho gaya, paisa lo" - aging alert: the SPECIFIC invoices
+    // past a threshold that need chasing now (recovery drops the older they get).
+    id: 'invoice_aging_alert',
+    phrases: ['crossed 60', 'crossed 90', '60 plus', '90 plus', '60 days', '90 days', '120 days', '180 days', 'past 60', 'past 90', 'past due 60', 'most overdue', 'oldest invoices', 'badly overdue', 'really old', 'urgent collection', 'collect now', 'paisa lo', 'what to collect', 'which invoices to collect', 'invoices over 60', 'invoices over 90', 'long overdue', 'kitne purane'],
+    keywords: ['urgent'],
+    handler: (s, n, _u, raw) => {
+      const m = (raw ?? n).match(/(\d{2,3})\s*(?:\+|plus|day|din)/i) || (n).match(/\b(60|90|120|180)\b/);
+      const thresh = m ? Math.max(30, Math.min(365, Number(m[1]))) : 60;
+      const hits = s.open.invoices.filter((iv) => iv.daysOut >= thresh).sort((a, b) => b.amount - a.amount);
+      if (!hits.length) return { title: `Nothing is past ${thresh} days right now - good.`, lines: [`Your oldest open invoice is ${Math.max(0, ...s.open.invoices.map((iv) => iv.daysOut))} days overdue.`] };
+      const tot = hits.reduce((a, b) => a + b.amount, 0);
+      return {
+        title: `${money(tot)} is more than ${thresh} days overdue (${hits.length} invoices) - chase these now:`,
+        lines: hits.slice(0, 10).map((iv) => `• #${iv.invoiceNumber} ${iv.customer}: ${money(iv.amount)} (${iv.daysOut}d overdue)`),
+        note: `Past ${thresh} days is real write-off risk - recovery keeps dropping the longer it sits. Biggest first = most cash for the calls.`,
+      };
+    },
+  },
+  {
+    id: 'concentration',
+    phrases: ['concentration', 'how concentrated', 'top customers share', 'how much from top', 'customer concentration', 'risk concentration', 'reliant on', 'how dependent', 'biggest exposure'],
+    keywords: ['concentration'],
+    handler: (s) => {
+      const top = s.open.topCustomers, tot = s.open.grossAr;
+      if (!top.length || !tot) return { title: `No outstanding AR to analyse.`, lines: [] };
+      const top5 = top.slice(0, 5).reduce((a, b) => a + b.open, 0);
+      const top10 = top.slice(0, 10).reduce((a, b) => a + b.open, 0);
+      return {
+        title: `Top 5 customers are ${pct(top5 / tot)} of your AR, top 10 are ${pct(top10 / tot)}.`,
+        lines: top.slice(0, 5).map((c, i) => `• ${i + 1}. ${c.customer}: ${money(c.open)} (${pct(c.open / tot)})`),
+        note: `The more concentrated, the more one big account slipping hurts. Watch the top names.`,
+      };
+    },
+  },
+  {
+    id: 'sales_yoy',
+    phrases: ['year over year', 'yoy', 'sales growth', 'are sales growing', 'growth rate', 'vs last year', 'compared to last year', 'this year vs last', 'sales trend', 'up or down vs', 'how is growth'],
+    keywords: ['yoy', 'growth'],
+    handler: (s) => {
+      const y = s.sales.yoy;
+      if (!y) return { title: `Year-over-year data isn't available right now.`, lines: [] };
+      const dir = y.rate >= 0 ? 'up' : 'down';
+      return {
+        title: `Sales are ${dir} ${pct(Math.abs(y.rate))} year-over-year.`,
+        lines: [
+          `${y.currYear} ${money(y.currYTD)} vs ${y.prevYear} ${money(y.prevYTD)} (same ${y.monthsCompared} months, apples-to-apples).`,
+          ...s.sales.yearly.slice(-4).map((yr) => `• ${yr.year}: ${money(yr.total)}${yr.yoyPct != null ? ` (${yr.yoyPct >= 0 ? '+' : ''}${Math.round(yr.yoyPct)}%)` : ''}`),
+        ],
+        note: `Compares only the closed months so the current partial month doesn't distort it.`,
+      };
+    },
+  },
+  {
+    id: 'sales_by_channel',
+    phrases: ['by channel', 'sales by channel', 'which channel', 'channel breakdown', 'channels', 'distribution channel', 'sales by brand', 'brand sales', 'brand mix'],
+    keywords: ['channel'],
+    handler: (s) => {
+      if (!s.sales.channels.length) return { title: `Channel data isn't available right now.`, lines: [] };
+      const tot = s.sales.channels.reduce((a, b) => a + b.total, 0);
+      return {
+        title: `Sales by channel:`,
+        lines: s.sales.channels.slice(0, 10).map((c) => `• ${c.channel}: ${money(c.total)}${tot ? ` (${pct(c.total / tot)})` : ''}`),
+        note: `Gross sales over the recent window, by distribution channel.`,
+      };
+    },
+  },
+  {
+    id: 'segment',
+    phrases: ['private label', 'infused origin', 'little tree vs', 'by segment', 'wholesale vs', 'segment breakdown', 'private label ar', 'how much private label'],
+    keywords: ['segment'],
+    handler: (s) => ({
+      title: `Open AR by segment:`,
+      lines: [
+        `• Little Tree (wholesale): ${money(s.open.segments.littleTree)}`,
+        `• Infused Origin (private label): ${money(s.open.segments.infusedOrigin)}`,
+        `• Total: ${money(s.open.segments.all)}`,
+      ],
+      note: `Private label = customers ticked as Infused Origin in the customer master list.`,
+    }),
+  },
 ];
+
+// ── "show me on the dashboard" navigation ────────────────────────────────────
+// Each intent maps to the AR Dashboard page it lives on (PAGES key in
+// Dashboard.jsx) plus a human "where" hint for the exact tab.
+export type ArNavTarget = { page: string; where: string };
+const AR_NAV: Record<string, ArNavTarget> = {
+  ar_total: { page: 'collections', where: 'Little Tree Accounts Receivable → Action List' },
+  overdue: { page: 'collections', where: 'Little Tree AR → Action List' },
+  aging: { page: 'collections', where: 'Little Tree AR → Aging tab' },
+  top_defaulters: { page: 'collections', where: 'Little Tree AR → Action List' },
+  invoice_aging_alert: { page: 'collections', where: 'Little Tree AR → Action List' },
+  dso: { page: 'collections', where: 'Little Tree AR → DSO tab' },
+  collected: { page: 'collections', where: 'Little Tree AR → Trends tab' },
+  recovery: { page: 'collections', where: 'Little Tree AR → Trends tab' },
+  customer_lookup: { page: 'customers', where: 'Little Tree Customers → All Customers' },
+  invoice_lookup: { page: 'collections', where: 'Little Tree AR → Action List' },
+  concentration: { page: 'sales', where: 'Sales → Concentration tab' },
+  gelato_ar: { page: 'gelato', where: 'Gelato Accounts Receivable' },
+  sales_top_customers: { page: 'sales', where: 'Sales → Overview' },
+  sales_by_channel: { page: 'sales', where: 'Sales → Brand Mix' },
+  sales_yoy: { page: 'sales', where: 'Sales → Overview' },
+  segment: { page: 'sales', where: 'Sales (toggle Little Tree / Infused Origin)' },
+  sales_by_rep: { page: 'commission', where: 'Commission' },
+  cooling_customers: { page: 'customers', where: 'Little Tree Customers → At-Risk' },
+  data_quality: { page: 'collections', where: 'Little Tree AR → Reconciliation tab' },
+  ar_briefing: { page: 'overview', where: 'Overview' },
+  fallback_briefing: { page: 'overview', where: 'Overview' },
+};
+
+function wantsLocation(n: string): boolean {
+  return /\b(show me|dikha|dikhao|kaha|kahan|where|take me|open the|on the dashboard|le chalo|le jao|jaao)\b/.test(n);
+}
 
 /** The AR briefing: the whole receivables picture in decision terms, 100% from
  *  the snapshot. Reused by the briefing intent and the fallback (no dead-ends). */
@@ -393,7 +512,7 @@ function arBriefing(s: ArSnapshot, user?: User): Answer {
   };
 }
 
-export type ArAssistantAnswer = { intent: string; confidence: number; title: string; lines: string[]; note?: string; suggestions?: string[] };
+export type ArAssistantAnswer = { intent: string; confidence: number; title: string; lines: string[]; note?: string; nav?: ArNavTarget; suggestions?: string[] };
 
 export function routeArQuestion(snap: ArSnapshot, question: string, user?: User): ArAssistantAnswer {
   const n = norm(question);
@@ -409,15 +528,21 @@ export function routeArQuestion(snap: ArSnapshot, question: string, user?: User)
   // a grounded answer instead of a dead-end.
   const wantsBriefing = /\b(how are we|how is ar|overall|summary|big picture|bottom line|should i worry|health|whats important|what should i do|brief|sab theek|kaisa)\b/.test(n);
   if (wantsBriefing || !best || bestScore < 2) {
+    const id = wantsBriefing ? 'ar_briefing' : 'fallback_briefing';
     const b = arBriefing(snap, user);
-    return { intent: wantsBriefing ? 'ar_briefing' : 'fallback_briefing', confidence: wantsBriefing ? 0.8 : 0.4, title: b.title, lines: b.lines ?? [], note: b.note, suggestions: SUGGESTIONS.slice(0, 4) };
+    const nav = AR_NAV[id];
+    const lines = (wantsLocation(n) && nav) ? [`📍 On the dashboard: ${nav.where}.`, ...(b.lines ?? [])] : (b.lines ?? []);
+    return { intent: id, confidence: wantsBriefing ? 0.8 : 0.4, title: b.title, lines, note: b.note, nav, suggestions: SUGGESTIONS.slice(0, 4) };
   }
 
   let ans: Answer;
   try { ans = best.handler(snap, n, user, question); }
   catch (e) { ans = { title: `I hit a snag reading that.`, lines: [`The data may still be loading - give it a moment and ask again.`], note: e instanceof Error ? e.message : undefined }; }
+  const nav = AR_NAV[best.id];
+  let lines = ans.lines ?? [];
+  if (wantsLocation(n) && nav) lines = [`📍 On the dashboard: ${nav.where}.`, ...lines];
   const suggestions = SUGGESTIONS.filter((x) => norm(x).indexOf(best!.id.split('_')[0]) === -1).slice(0, 4);
-  return { intent: best.id, confidence: Math.min(1, bestScore / 10), title: ans.title, lines: ans.lines ?? [], note: ans.note, suggestions };
+  return { intent: best.id, confidence: Math.min(1, bestScore / 10), title: ans.title, lines, note: ans.note, nav, suggestions };
 }
 
 export async function askArAssistant(question: string, user?: User): Promise<ArAssistantAnswer & { asOf: string }> {

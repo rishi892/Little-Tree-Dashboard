@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNav } from '../lib/navigation.jsx';
 
 // AR Copilot - the AR Dashboard's own assistant (sibling of the Cashflow CFO
 // Copilot). Deterministic, answers ONLY from live AR data via /api/ar-assistant.
@@ -43,6 +44,7 @@ async function askAr(question, user) {
 export function ArCopilot() {
   const me = useMemo(readMe, []);
   const firstName = me.name ? me.name.split(/\s+/)[0] : '';
+  const { navigate } = useNav();
 
   const greeting = useMemo(() => ({
     role: 'bot',
@@ -90,7 +92,7 @@ export function ArCopilot() {
     setBusy(true);
     try {
       const res = await askAr(question, me.name ? me : undefined);
-      setMsgs((m) => [...m, { role: 'bot', title: res.title, lines: res.lines || [], note: res.note, suggestions: res.suggestions }]);
+      setMsgs((m) => [...m, { role: 'bot', title: res.title, lines: res.lines || [], note: res.note, nav: res.nav, suggestions: res.suggestions }]);
     } catch (e) {
       setMsgs((m) => [...m, { role: 'bot', title: `Sorry, I couldn't reach the AR data just now.`, lines: [`(${e?.message || 'error'}) Try again in a moment.`] }]);
     } finally {
@@ -150,6 +152,15 @@ export function ArCopilot() {
                         </div>
                       )}
                     </div>
+                    {m.nav && (
+                      <button
+                        onClick={() => { navigate(m.nav.page); setOpen(false); }}
+                        title={m.nav.where}
+                        style={{ marginTop: 8, alignSelf: 'flex-start', fontSize: 12.5, fontWeight: 600, padding: '7px 12px', borderRadius: 999, border: 'none', background: 'linear-gradient(135deg, #1d4ed8, #3b82f6)', color: '#fff', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                      >
+                        📍 Show me on the dashboard
+                      </button>
+                    )}
                     {m.suggestions && m.suggestions.length > 0 && (
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
                         {m.suggestions.map((s) => (
