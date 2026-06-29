@@ -281,6 +281,17 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  : undefined;
  const warnings: string[] = [];
 
+ // Refresh the QB token ONCE up front (coalesced) BEFORE the burst of QB calls
+ // below (P&L, inventory, vendor breakdown, accounts). Otherwise, when the token
+ // is near expiry, several of those calls race to refresh it at once - one
+ // rotates the refresh token and the others get "Refresh token invalid", so the
+ // expense pull fails. The isGood guard then refuses to cache that degraded
+ // result, and the 13-week keeps serving the LAST good value - which is the
+ // PREVIOUS week, so the plan appears stuck and never rolls to the new Monday.
+ // One refresh here, then every QB call reuses the fresh token (no race).
+ try { const { getValidAccessToken } = await import('./oauth.js'); await getValidAccessToken(); }
+ catch { /* QB genuinely down → individual calls below degrade + self-heal */ }
+
  // 1. Opening cash = "Cash on Hand" = the SAME 4 accounts the Current Position
  // tab sums, so the number matches everywhere:
  //   Checking 7561 (Tiller live) + BMM 0910 (Tiller live)
