@@ -32,6 +32,7 @@ import { getArProjection, type ArProjectionResult } from './arProjection.js';
 import { getMappedExpenses } from './mappedExpenses.js';
 import { computePnlExpenses } from './pnlExpenses.js';
 import { getQbPlReport } from './qbPlReport.js';
+import { withDurableCache } from './qbCache.js';
 import { loadOverrides } from './categoryOverrides.js';
 import { getInventoryPurchases } from './inventoryPurchases.js';
 import { getVendorBreakdownForAccounts } from './categoryVendors.js';
@@ -541,7 +542,18 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // each category's accounts (Rishi, etc.) are the QB accounts you mapped, so
  // run-rates + the per-account breakdown line up with what you see everywhere.
  // Unmapped accounts ride along in "Other" so the total stays complete.
- const [plReport, overrides] = await Promise.all([getQbPlReport('Cash'), loadOverrides()]);
+ // Read the P&L through its DURABLE cache (same key the /api/qb-pl-report
+ // endpoint + prewarm populate). On a transient "Refresh token invalid" - the
+ // cross-instance race when local dev + prod share the Supabase token, or two QB
+ // calls refresh at once - withDurableCache serves the LAST-GOOD P&L instead of
+ // throwing, so outflows stay correct. Otherwise a one-off blip zeroed every
+ // outflow, the isGood guard refused to cache that, and the 13-week froze on the
+ // PREVIOUS week (stopped rolling each Monday).
+ const loadPl = async () => {
+ const r = await withDurableCache('qb-pl-report:Cash', 30 * 60 * 1000, () => getQbPlReport('Cash'), () => true);
+ return r.data;
+ };
+ const [plReport, overrides] = await Promise.all([loadPl(), loadOverrides()]);
  const pnl = computePnlExpenses(plReport, overrides);
  const combined = {
  rows: pnl.categories.map((c) => ({
@@ -619,7 +631,9 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // trace (cash spent buying inventory - hits the inventory asset, not the P&L
  // expense categories), so it does not double-count with COGS.
  try {
- const invPurch = await getInventoryPurchases();
+ // Durable-cached too (serve-stale on a token blip) so Inventory doesn't silently
+ // drop to 0 and understate outflows when QB hiccups mid-recompute.
+ const invPurch = (await withDurableCache('inventory-purchases', 30 * 60 * 1000, getInventoryPurchases, (d) => d.total > 0)).data;
  invPurchMonthly = monthlyRunRate(invPurch.monthlyTotal ?? []);
  const tot = (invPurch.byVendor ?? []).reduce((s, v) => s + v.total, 0) || 1;
  for (const v of (invPurch.byVendor ?? [])) {
