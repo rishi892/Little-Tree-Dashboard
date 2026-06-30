@@ -723,8 +723,8 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  if (e && Number.isFinite(e.value)) effectiveGross[i] = e.value;
  }
  }
- const sameWeekWeekly = new Array(WEEKS).fill(0);       // 13% immediate cash
- const laggedNewSalesWeekly = new Array(WEEKS).fill(0); // 87% ages into AR, collects later
+ const sameWeekWeekly = new Array(WEEKS).fill(0);       // ~15% (sameWeekRate) immediate cash
+ const laggedNewSalesWeekly = new Array(WEEKS).fill(0); // ~85% (1 - sameWeekRate) ages into AR
  if (opts.direction !== 'past') {
  try {
  const { getCollectionLagCurve } = await import('./snapshotActuals.js');
@@ -733,7 +733,7 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  const laggedProfile = tail.map((v) => v / tsum);            // ~87% spread over wk+1..+12
  for (let w = 0; w < WEEKS; w++) {
  const gross = effectiveGross[w] ?? 0;
- sameWeekWeekly[w] += gross * sameWeekRate;                  // same-week (~13%)
+ sameWeekWeekly[w] += gross * sameWeekRate;                  // same-week (~15%)
  const lagAmt = gross * (1 - sameWeekRate);
  for (let k = 0; k < laggedProfile.length && w + 1 + k < WEEKS; k++) laggedNewSalesWeekly[w + 1 + k] += lagAmt * laggedProfile[k];
  }
