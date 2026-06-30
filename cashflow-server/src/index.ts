@@ -1522,11 +1522,13 @@ async function prewarmSheetCaches(): Promise<void> {
  warm('purex-clearing', () => getPurexClearingCached(true), () => {/* durable cache populated inside */}),
  warm('sheet-expenses', () => getSheetExpenses(), (data, at) => { seCache = { at, data }; }),
  ]);
- // Cashflow-13week reads sheet AR live each call, but its QB-side inputs
- // (mappedExpenses / inventoryPurchases) are served from their own 60-min
- // module caches - so re-warming here is cheap and propagates fresh sheet
- // data to the 13-week table within 30s of an invoice add.
- await warm('cashflow-13week', () => getCashflow13WeekCached('future', true), () => {});
+ // Touch the 13-week on the fast (sheet) cycle but DON'T force it - read its
+ // 5-min cache. Forcing here recomputed the whole QB-heavy 13-week every 30s
+ // (P&L + inventory + accounts + vendor breakdown), hammering the QuickBooks API
+ // and churning the token on a long-lived host. Non-forced = it recomputes at
+ // most once per 5-min TTL, so a new invoice still reflects within ~5 min while
+ // QB load drops ~10x. The 30-min QB cycle force-refreshes it fully.
+ await warm('cashflow-13week', () => getCashflow13WeekCached('future', false), () => {});
  console.log(`[prefetch sheets] refreshed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 }
 
