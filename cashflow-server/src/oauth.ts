@@ -112,8 +112,21 @@ export async function getValidAccessToken(): Promise<StoredTokens> {
  return fresh ?? tokens; // last resort
  }
 
- // We won the lock → perform the single refresh and persist it.
- refreshInFlight = performIntuitRefresh(tokens).finally(() => { refreshInFlight = null; });
+ // We won the lock. RE-READ the token first: another worker may have refreshed
+ // and released between our initial read (line ~77) and our lock acquisition. If a
+ // fresher refresh_token is already saved, USE IT and do NOT refresh again - a
+ // second refresh with the rotated-out refresh_token trips Intuit's reuse
+ // detection, which revokes the WHOLE token family and forces a manual re-connect.
+ // Re-reading here is the difference between "self-heals forever" and "randomly
+ // needs re-login".
+ const latest = await loadTokensFresh();
+ if (latest && latest.refreshToken !== tokens.refreshToken && Date.now() < latest.expiresAt - 20_000) {
+ await releaseRefreshLock(tokens.realmId).catch(() => {});
+ return latest;
+ }
+ // Refresh with the freshest token we have, and persist it.
+ const base = latest ?? tokens;
+ refreshInFlight = performIntuitRefresh(base).finally(() => { refreshInFlight = null; });
  // If our token is still usable we could return it now, but we await here so the
  // new token is guaranteed saved before this serverless invocation freezes.
  return refreshInFlight;
