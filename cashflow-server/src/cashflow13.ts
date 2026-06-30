@@ -38,7 +38,7 @@ import { getInventoryPurchases } from './inventoryPurchases.js';
 import { getVendorBreakdownForAccounts } from './categoryVendors.js';
 import { getCcPaymentSchedule, type CcScheduledPayment } from './ccSchedule.js';
 import { getSalesForecast, type SalesForecastResult } from './salesForecast.js';
-import { captureSnapshotIfNeeded, getSnapshot, type WeeklySnapshot } from './weeklySnapshots.js';
+import { captureSnapshotIfNeeded, getSnapshot, getOpeningBreakdown, saveOpeningBreakdown, type WeeklySnapshot } from './weeklySnapshots.js';
 
 const WEEKS = 13;
 
@@ -948,20 +948,28 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  // re-anchors to the new actual balance next Monday. A snapshot from before a
  // cash-definition change (different labels) is treated as stale and refreshed
  // once with today's value. (Live cash-on-hand lives on the Current Position tab.)
+ // Wk-1 opening must be a STABLE anchor: the cash on THIS WEEK'S MONDAY, not a
+ // number that drifts as balances move mid-week. The first compute of the week
+ // captures the live cash as that Monday's opening; every later read DISPLAYS that
+ // frozen snapshot, so the opening only changes when the week rolls (next Monday).
+ // Live, daily cash-on-hand stays on the Current Position tab + the dashboard KPI.
  let staleSnapshot = false;
  if (opts.direction !== 'past') {
  try {
  const existing = await getSnapshot(ymd(ANCHOR));
- if (existing) {
+ if (existing && Number.isFinite(existing.openingCash)) {
  const labelsNow = JSON.stringify([...inflows.map((l) => l.label), ...outflows.map((l) => l.label)]);
  const labelsWas = JSON.stringify([...(existing.inflows ?? []).map((l) => l.label), ...(existing.outflows ?? []).map((l) => l.label)]);
- // Opening now tracks LIVE current cash-in-hand (the SAME number as Current
- // Position + the dashboard KPI) - not frozen - so the balance updates
- // everywhere it's shown. If the stored Monday snapshot is stale vs the live
- // value (or pre-dates a cash-definition change), re-capture it so the
- // Past-Weeks variance baseline stays correct.
- const wasFrozen = labelsNow === labelsWas && Number.isFinite(existing.openingCash);
- if (!wasFrozen || Math.round(existing.openingCash) !== Math.round(openingCashWk1)) {
+ if (labelsNow === labelsWas) {
+ // Valid Monday snapshot exists → FREEZE the displayed opening to it.
+ openingCashWk1 = +existing.openingCash.toFixed(2);
+ const frozenBd = await getOpeningBreakdown(ymd(ANCHOR)).catch(() => null);
+ if (frozenBd && frozenBd.length) openingCashBreakdown = frozenBd;
+ const md = `${ANCHOR.getUTCMonth() + 1}/${ANCHOR.getUTCDate()}`;
+ openingCashNote = `Cash on Monday ${md} - frozen for the week (updates next Monday). Live cash is on Current Position.`;
+ } else {
+ // Cash-definition (line labels) changed since capture → re-capture today's
+ // value as the new Monday baseline so the variance/opening stay correct.
  staleSnapshot = true;
  }
  }
@@ -1015,6 +1023,9 @@ export async function getCashflow13Week(opts: { direction?: 'future' | 'past' } 
  salesForecast13wTotal: salesForecast?.totalProjectedCash ?? 0,
  };
  await captureSnapshotIfNeeded(snap, { force: staleSnapshot });
+ // Also freeze this Monday's per-account breakdown so the frozen opening's drill
+ // matches its frozen total all week (idempotent - first capture wins per Monday).
+ await saveOpeningBreakdown(ymd(ANCHOR), openingCashBreakdown.map((b) => ({ label: b.label, amount: b.amount, sub: b.sub })), staleSnapshot).catch(() => {});
  } catch (e) {
  warnings.push(`Snapshot capture failed (${e instanceof Error ? e.message : '?'}).`);
  }
