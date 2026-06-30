@@ -1,16 +1,22 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, lazy, Suspense } from 'react';
 import { disconnect, fetchDashboard, fetchStatus, fetchCashflow13, fetchMappedExpenses, type DashboardData, type Cashflow13, type Status } from './api';
 import { formatCurrency, formatMonths } from './format';
 import { KpiCard, type KpiBreakdownRow } from './components/KpiCard';
-import { Projection13WeekChart } from './components/Projection13WeekChart';
 import { Sidebar } from './components/Sidebar';
-import { ExpensesHub } from './components/ExpensesHub';
 import { CashflowHub } from './components/CashflowHub';
-import { ReportsHub } from './components/ReportsHub';
-import { SalesHub } from './components/SalesHub';
-import { Upflow } from './components/Upflow';
 import { CfoCopilot } from './components/CfoCopilot';
 import { onCfoNav } from './cfoNav';
+
+// Lazy-loaded so the heavy chart library (recharts, ~550KB) and the non-default
+// sections only download when they're actually opened. The landing view (Current
+// Position) has no chart, so the first paint is far lighter/faster.
+const Projection13WeekChart = lazy(() => import('./components/Projection13WeekChart').then((m) => ({ default: m.Projection13WeekChart })));
+const ExpensesHub = lazy(() => import('./components/ExpensesHub').then((m) => ({ default: m.ExpensesHub })));
+const SalesHub = lazy(() => import('./components/SalesHub').then((m) => ({ default: m.SalesHub })));
+const ReportsHub = lazy(() => import('./components/ReportsHub').then((m) => ({ default: m.ReportsHub })));
+const Upflow = lazy(() => import('./components/Upflow').then((m) => ({ default: m.Upflow })));
+
+const LazyLoading = () => <div className="section" style={{ padding: 18, color: 'var(--muted)' }}>Loading…</div>;
 
 // Auth flag the AR-shell sets after a successful Cashflow login. Stored in
 // sessionStorage (NOT localStorage) so it expires the moment the browser
@@ -199,10 +205,10 @@ function Dashboard({ onSignOut }: { onSignOut: () => void }) {
  }
  />
  </div>
- <div style={{ display: view === 'expenses' ? 'block' : 'none' }}><ExpensesHub /></div>
- <div style={{ display: view === 'sales' ? 'block' : 'none' }}>{view === 'sales' && <SalesHub />}</div>
- <div style={{ display: view === 'reports' ? 'block' : 'none' }}><ReportsHub /></div>
- <div style={{ display: view === 'upflow' ? 'block' : 'none' }}>{view === 'upflow' && <Upflow />}</div>
+ <div style={{ display: view === 'expenses' ? 'block' : 'none' }}>{view === 'expenses' && <Suspense fallback={<LazyLoading />}><ExpensesHub /></Suspense>}</div>
+ <div style={{ display: view === 'sales' ? 'block' : 'none' }}>{view === 'sales' && <Suspense fallback={<LazyLoading />}><SalesHub /></Suspense>}</div>
+ <div style={{ display: view === 'reports' ? 'block' : 'none' }}>{view === 'reports' && <Suspense fallback={<LazyLoading />}><ReportsHub /></Suspense>}</div>
+ <div style={{ display: view === 'upflow' ? 'block' : 'none' }}>{view === 'upflow' && <Suspense fallback={<LazyLoading />}><Upflow /></Suspense>}</div>
 
  </main>
  <CfoCopilot />
@@ -378,7 +384,9 @@ function DashboardView({
  </div>
  </div>
  </div>
+ <Suspense fallback={<div className="section" style={{ padding: 18, color: 'var(--muted)' }}>Loading chart…</div>}>
  <Projection13WeekChart data={cf13} />
+ </Suspense>
  </div>
  )}
  </>
