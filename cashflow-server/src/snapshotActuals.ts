@@ -222,16 +222,28 @@ export async function getSameWeekCollectionRate(): Promise<number> {
   const m = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - back));
   return `${m.getUTCFullYear()}-${String(m.getUTCMonth() + 1).padStart(2, '0')}-${String(m.getUTCDate()).padStart(2, '0')}`;
  };
- let same = 0, total = 0;
+ // Group collections by the MONTH the payment landed, then average each month's
+ // same-week share with EQUAL weight (simple average of the monthly rates, ~15%)
+ // - per user preference - rather than dollar-weighting the whole period (~13%,
+ // which a few big-collection months drag down). Each month counts the same.
+ const byMonth = new Map<string, { same: number; total: number; ord: number }>();
  for (const inv of ltFin.invoices) {
   if (inv.paid <= 0 || !inv.paidDate) continue;
   if (inv.channel === 'Gelato') continue;     // non-Gelato only (Gelato is Net 97)
-  total += inv.paid;
+  const yr = inv.paidDate.getUTCFullYear(), mo = inv.paidDate.getUTCMonth();
+  const ym = `${yr}-${mo}`;
+  const m = byMonth.get(ym) ?? { same: 0, total: 0, ord: yr * 12 + mo };
+  m.total += inv.paid;
   // Invoice date from the Tracker (bill) when the invoice number matches.
   const billDate = billDates.get(inv.invoiceNumber.trim().toLowerCase()) ?? inv.invoiceDate;
-  if (mondayKey(billDate) === mondayKey(inv.paidDate)) same += inv.paid;
+  if (mondayKey(billDate) === mondayKey(inv.paidDate)) m.same += inv.paid;
+  byMonth.set(ym, m);
  }
- return total > 0 ? same / total : 0;
+ // Average each month's same-week share with EQUAL weight over the LAST 12 months
+ // with collections (per user preference, ~15%) - not dollar-weighted (~13%) and
+ // not all-time (older months drag it to ~12.6%). Each recent month counts once.
+ const monthlyRates = [...byMonth.values()].filter((m) => m.total > 0).sort((a, b) => b.ord - a.ord).slice(0, 12).map((m) => m.same / m.total);
+ return monthlyRates.length ? monthlyRates.reduce((s, r) => s + r, 0) / monthlyRates.length : 0;
 }
 
 let _lagCurveCache: { at: number; curve: number[] } | null = null;
