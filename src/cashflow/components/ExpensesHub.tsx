@@ -19,11 +19,19 @@ const TABS: Array<{ key: ExpensesTab; label: string }> = [
 
 export function ExpensesHub() {
  const [tab, setTab] = useState<ExpensesTab>('monthly');
+ // Keep-alive: mount a tab on FIRST visit, then keep it mounted (hidden) so
+ // switching back is instant (no re-fetch / loading flash). Initial load still
+ // only mounts the default tab, so it stays light (Combined/PureX/Moysh are each
+ // a separate QB pull - we don't fire all five at once).
+ const [seen, setSeen] = useState<Set<ExpensesTab>>(() => new Set<ExpensesTab>(['monthly']));
+ useEffect(() => { setSeen((s) => (s.has(tab) ? s : new Set(s).add(tab))); }, [tab]);
 
  // CFO Copilot "show me" - switch to the expenses sub-tab it points at.
  useEffect(() => onCfoNav((d) => {
  if (['monthly', 'combined', 'purex', 'moysh', 'mapping'].includes(d.tab)) setTab(d.tab as ExpensesTab);
  }), []);
+
+ const show = (k: ExpensesTab): React.CSSProperties => ({ display: tab === k ? 'block' : 'none' });
 
  return (
  <>
@@ -39,35 +47,38 @@ export function ExpensesHub() {
  ))}
  </div>
 
- {/* Lazy-mount: render ONLY the active tab so opening Expenses fetches just one
- tab's data instead of firing all five (Combined/PureX/Moysh are each a separate
- QB pull). The durable cache makes switching back near-instant. */}
- {tab === 'monthly' && <MonthlySummary />}
- {tab === 'combined' && (
+ {seen.has('monthly') && <div style={show('monthly')}><MonthlySummary /></div>}
+ {seen.has('combined') && (
+ <div style={show('combined')}>
  <MappedExpensesPage
  entity="Combined"
  title="Combined (PureX + Moysh)"
  subtitle="Sheet category layout · combined PureX + Moysh totals"
  totalLabel="COMBINED TOTAL"
  />
+ </div>
  )}
- {tab === 'purex' && (
+ {seen.has('purex') && (
+ <div style={show('purex')}>
  <MappedExpensesPage
  entity="PureX"
  title="PureX"
  subtitle="QB Live · transactions paid from the PureX bank account"
  totalLabel="PUREX TOTAL"
  />
+ </div>
  )}
- {tab === 'moysh' && (
+ {seen.has('moysh') && (
+ <div style={show('moysh')}>
  <MappedExpensesPage
  entity="Moysh"
  title="Moysh (Other)"
  subtitle="Sheet category layout · only Moysh-paid amounts"
  totalLabel="MOYSH (OTHER) TOTAL"
  />
+ </div>
  )}
- {tab === 'mapping' && <PnlMappingPage />}
+ {seen.has('mapping') && <div style={show('mapping')}><PnlMappingPage /></div>}
  </>
  );
 }
