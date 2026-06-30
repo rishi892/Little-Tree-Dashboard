@@ -7,7 +7,7 @@ import { config } from './config.js';
 import { buildAuthUrl, exchangeCodeForTokens } from './oauth.js';
 import { qbCredsConfigured } from './qbConfig.js';
 import { loadTokens, clearTokens } from './tokenStore.js';
-import { getDashboardData } from './qbo.js';
+import { getDashboardData, type DashboardData } from './qbo.js';
 import { getCachedSubscriptionAudit, invalidateSubscriptionAuditCache } from './audit.js';
 import { getExpenseDetail, type ExpenseDetailResult } from './expenseDetail.js';
 import { detectRecurringSubscriptions, type RecurringResult } from './recurring.js';
@@ -271,10 +271,20 @@ app.get('/auth/callback', async (req: Request, res: Response, next: NextFunction
  }
 });
 
+// isGood: never cache a DEGRADED cash figure. getDashboardData starts from the
+// Tiller banks and ADDS the QB-side intercompany (PureX bank + Due From PureX,
+// ~$158k of the ~$179k). If that QB pull fails it silently falls back to
+// bank-only cash (e.g. ~$7k) - caching that would make the Cash-on-hand KPI show a
+// tiny wrong number instead of matching Current Position. So only cache when the
+// QB intercompany is present; otherwise keep serving the last GOOD ~$179k.
+const dashboardGood = (d: DashboardData): boolean => {
+ const qb = (d.cashBreakdown || []).filter((b) => /purex bank|due from/i.test(b.label)).reduce((s, b) => s + (b.value || 0), 0);
+ return qb > 0;
+};
 app.get('/api/dashboard', async (req, res, next) => {
  try {
  const force = req.query.refresh === '1';
- const { data } = await withDurableCache('dashboard', 30 * 60 * 1000, () => getDashboardData(12), () => true, force);
+ const { data } = await withDurableCache('dashboard', 30 * 60 * 1000, () => getDashboardData(12), dashboardGood, force);
  res.json(data);
  } catch (err) {
  next(err);
