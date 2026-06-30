@@ -1711,11 +1711,30 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
  const sumBOut = (lbl: string) => { const line = budgetData.outflows.find((l) => l.label === lbl); return line ? budgetWk.reduce((s, x) => s + (line.values[x.i] ?? 0), 0) : 0; };
  const bInTotal = budgetWk.reduce((s, x) => s + (budgetData.totals.inflows[x.i] ?? 0), 0);
  const bOutTotal = budgetWk.reduce((s, x) => s + (budgetData.totals.outflows[x.i] ?? 0), 0);
+ // Total outflows EXCLUDING Credit Card Payments (dropped from the Variance), so
+ // the displayed lines still add up to the shown total.
+ const bOutTotalEx = bOutTotal - sumBOut('Credit Card Payments');
 
  // ACTUAL inflow: the REAL collected invoices in the calendar period (by paid
  // date). AR + Gelato come straight from that detail; outflows from the closed
  // weeks' QB expenses.
  const gridItems = items.filter((it) => it.monday >= periodStart && it.weekEnd <= periodEnd);
+ // Split the REAL non-Gelato collections into same-week vs lagged, mirroring the
+ // budget's two lines (Weekly Cash Collection = same-week, Little Tree AR =
+ // lagged). An invoice is "same-week" when its bill week (Monday) equals its paid
+ // week - exactly the rule behind the 13% same-week rate. The two pieces still sum
+ // to the full nonGelato collected, so the inflow TOTAL never double-counts.
+ const mondayOf = (s: string): string => {
+  const d = new Date(s + 'T00:00:00Z');
+  if (Number.isNaN(d.getTime())) return '';
+  const back = d.getUTCDay() === 0 ? 6 : d.getUTCDay() - 1;
+  return new Date(d.getTime() - back * 86400000).toISOString().slice(0, 10);
+ };
+ const sameWeekActual = detail
+  ? +detail.nonGelato.invoices
+     .filter((iv) => iv.invoiceDate && iv.paidDate && mondayOf(iv.invoiceDate) === mondayOf(iv.paidDate))
+     .reduce((s, iv) => s + (iv.paid ?? 0), 0).toFixed(2)
+  : 0;
  const actualIn = (lbl: string): number | null => {
   if (!detail) return null;
   if (/gelato/i.test(lbl)) return detail.gelato.total;
@@ -1727,8 +1746,11 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
    if (detail.salesInvoiced) return detail.salesInvoiced.nonGelato.amount;
    let any = false, t = 0; for (const it of gridItems) if (it.actuals) { any = true; t += actualForInflowLine(lbl, it.actuals) ?? 0; } return any ? t : null;
   }
-  if (/collected from sales|weekly cash|new sales/i.test(lbl)) return 0;   // folded into AR
-  if (/past ar|little tree account|lag-curve|non-gelato/i.test(lbl)) return detail.nonGelato.total;
+  // Same-week collection (Weekly Cash Collection) - the REAL same-week portion.
+  if (/collected from sales|weekly cash|new sales/i.test(lbl)) return sameWeekActual;
+  // Little Tree AR (lag-curve) = everything else collected (lagged), so the two
+  // lines add up to the full non-Gelato collected with no double-count.
+  if (/past ar|little tree account|lag-curve|non-gelato/i.test(lbl)) return +(detail.nonGelato.total - sameWeekActual).toFixed(2);
   return null;
  };
  const aInTotal = detail ? +(detail.nonGelato.total + detail.gelato.total).toFixed(2) : null;
@@ -1770,10 +1792,15 @@ function VariancePicker({ budgetData, pastGrid }: { budgetData: Cashflow13; past
  for (const lbl of budgetData.inflows.map((l) => l.label)) rows.push({ label: lbl, budget: sumBIn(lbl), actual: actualIn(lbl) });
  rows.push({ label: 'Total inflows', budget: bInTotal, actual: aInTotal, strong: true });
  rows.push({ label: 'CASH OUTFLOWS', budget: null, actual: null, head: 'out' });
- for (const lbl of budgetData.outflows.map((l) => l.label)) rows.push({ label: lbl, budget: sumBOut(lbl), actual: actualOut(lbl), lowerBetter: true });
- rows.push({ label: 'Total outflows', budget: bOutTotal, actual: aOutTotal, lowerBetter: true, strong: true });
+ for (const lbl of budgetData.outflows.map((l) => l.label)) {
+  // Credit Card Payments has no comparable actual here (CC payoffs aren't a P&L
+  // expense), so it only ever showed "pending" - drop it from the Variance.
+  if (/credit card payment/i.test(lbl)) continue;
+  rows.push({ label: lbl, budget: sumBOut(lbl), actual: actualOut(lbl), lowerBetter: true });
+ }
+ rows.push({ label: 'Total outflows', budget: bOutTotalEx, actual: aOutTotal, lowerBetter: true, strong: true });
  const actNet = (aInTotal != null && aOutTotal != null) ? aInTotal - aOutTotal : null;
- rows.push({ label: 'NET CHANGE', budget: bInTotal - bOutTotal, actual: actNet, strong: true });
+ rows.push({ label: 'NET CHANGE', budget: bInTotal - bOutTotalEx, actual: actNet, strong: true });
 
  const deltaCell = (budget: number | null, actual: number | null, lowerBetter = false): React.ReactNode => {
   if (budget === null && actual === null) return muted('-');
