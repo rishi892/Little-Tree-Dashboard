@@ -1013,10 +1013,13 @@ const noBadWarning = (warnings?: unknown): boolean => {
 
 // Current Position snapshot - moderate cost (3 QB queries). Cache 30 min.
 const CP_TTL_MS = 30 * 60 * 1000;
-// Durable-cached: serve the last GOOD position if QB is throttled/down, and
-// never cache a throttle-degraded result.
+// Cache whenever QB returned real cash accounts - even if a stray throttle/token
+// warning rode along. Gating on noBadWarning was TOO strict: a transient token
+// blip left a perfectly good result uncached, so every read re-ran the 3 QB
+// queries (8-30s). Caching on data-present means there's always a last-good to
+// serve instantly; a truly failed pull (no accounts) still isn't cached.
 const getCurrentPositionCached = (force = false) =>
-  withDurableCache('current-position', CP_TTL_MS, getCurrentPosition, (d) => noBadWarning(d.warnings), force);
+  withDurableCache('current-position', CP_TTL_MS, getCurrentPosition, (d) => (d?.cash?.accounts?.length ?? 0) > 0, force);
 
 app.get('/api/current-position', async (req, res, next) => {
  try {
@@ -1063,10 +1066,12 @@ app.get('/api/tiller/balances', async (req, res, next) => {
 // "live" - it serves last-good instantly and revalidates in the background, and
 // the QB account list it pulls is itself coalesced/cached (~60s) so this is cheap.
 const LINKED_TTL_MS = 2 * 60 * 1000;
-// A result is "good" (worth caching) only when QB actually returned accounts and
-// there's no auth warning. A degraded result never overwrites the last good one.
+// "Good" = QB actually returned accounts. We DON'T also require noBadWarning:
+// a transient throttle/token warning alongside real account data shouldn't stop
+// us caching it, else every read re-pulls QB (8-30s) because nothing is ever
+// stored. Data-present is the right bar - a failed pull (no accounts) still
+// won't cache, and the bg refresh corrects any partial result.
 const isGoodLinked = (d: LinkedBalances): boolean =>
-  noBadWarning(d.warnings) &&
   d.qb.cashAccounts.length + d.qb.creditCards.length > 0;
 const getLinkedBalancesCached = (force = false) =>
   withDurableCache('linked-balances', LINKED_TTL_MS, getLinkedBalances, isGoodLinked, force);
