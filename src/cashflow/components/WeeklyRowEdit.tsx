@@ -20,7 +20,7 @@ import { formatCurrency } from '../format';
  */
 type PRow = { key: string; amount: number; manual: boolean; details: string };
 
-export function WeeklyRowEdit({ rowRx, heading, sub }: { rowRx: RegExp; heading: string; sub: string }) {
+export function WeeklyRowEdit({ rowRx, heading, sub, hideHeading }: { rowRx: RegExp; heading: string; sub: string; hideHeading?: boolean }) {
  const [data, setData] = useState<Cashflow13 | null>(null);
  const [, setLineEdits] = useState<CashflowEdits>({});
  const [payeeEdits, setPayeeEdits] = useState<PayeeEdits>({});
@@ -178,13 +178,15 @@ export function WeeklyRowEdit({ rowRx, heading, sub }: { rowRx: RegExp; heading:
  const grandComp = lineCompTot.reduce((s, v) => s + v, 0);
 
  return (
- <div className="section">
+ <div className={hideHeading ? '' : 'section'}>
  <div className="section-head" style={{ alignItems: 'center' }}>
+ {!hideHeading && (
  <div>
  <div className="section-title">{heading}</div>
  <div className="section-sub">{sub} · per-payee, editable per week · matches the 13-Week breakdown · saved with your name.</div>
  </div>
- <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+ )}
+ <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginLeft: hideHeading ? 'auto' : undefined }}>
  <button className="btn ghost" onClick={() => { setAddOpen((o) => !o); setError(null); }}>+ Add head</button>
  {savedAt && !dirty && <span style={{ color: '#059669', fontSize: 13, fontWeight: 600 }}>Saved ✓</span>}
  <button className="btn" onClick={() => void onSave()} disabled={saving || !dirty}>
