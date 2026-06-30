@@ -820,36 +820,6 @@ export function CashFlow13Week() {
  </div>
  </div>
 
- <div className="section">
- <div className="section-head">
- <div>
- <div className="section-title">Weekly run-rates</div>
- <div className="section-sub">Average weekly spend (from QuickBooks).</div>
- </div>
- </div>
- <div className="table-wrap">
- <table className="data-table">
- <tbody>
- <tr>
- <td>Credit Card payoff (Wk 1)</td>
- <td className="num"><strong>{formatCurrency(assumptions.ccPayoffWk1)}</strong></td>
- </tr>
- <tr>
- <td>Payroll per week</td>
- <td className="num"><strong>{formatCurrency(Math.round(assumptions.payrollPerWeek))}</strong></td>
- </tr>
- <tr>
- <td>Inventory & Raw Materials per week</td>
- <td className="num"><strong>{formatCurrency(Math.round(assumptions.inventoryPerWeek))}</strong></td>
- </tr>
- <tr>
- <td>Other operating expenses per week</td>
- <td className="num"><strong>{formatCurrency(Math.round(assumptions.otherPerWeek))}</strong></td>
- </tr>
- </tbody>
- </table>
- </div>
- </div>
  </>}
 
  {editingCell && (
