@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNav } from '../lib/navigation.jsx';
+import { arNavigate } from '../lib/arNav.js';
 
 // AR Copilot - the AR Dashboard's own assistant (sibling of the Cashflow CFO
 // Copilot). Deterministic, answers ONLY from live AR data via /api/ar-assistant.
@@ -155,14 +156,11 @@ export function ArCopilot() {
                     {m.nav && (
                       <button
                         onClick={() => {
-                          navigate(m.nav.page);
+                          // Close the panel first so the guided robot is visible,
+                          // then let it walk over, tap the sidebar item, and point
+                          // at the section (same "tap tap" as the cashflow copilot).
                           setOpen(false);
-                          // Scroll the dashboard to the top so there's a visible
-                          // response even when the target page is the one already open.
-                          setTimeout(() => {
-                            document.querySelector('.dash-content')?.scrollTo({ top: 0, behavior: 'smooth' });
-                            window.scrollTo({ top: 0, behavior: 'smooth' });
-                          }, 60);
+                          setTimeout(() => arNavigate({ page: m.nav.page, where: m.nav.where }, navigate), 120);
                         }}
                         title={m.nav.where}
                         style={{ marginTop: 8, alignSelf: 'flex-start', fontSize: 12.5, fontWeight: 600, padding: '7px 12px', borderRadius: 999, border: 'none', background: 'linear-gradient(135deg, #1d4ed8, #3b82f6)', color: '#fff', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}

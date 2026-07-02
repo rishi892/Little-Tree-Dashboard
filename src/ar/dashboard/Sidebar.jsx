@@ -76,6 +76,7 @@ export default function Sidebar({ active, onChange, onLogout, allowedIds, role }
         {items.map((item) => (
           <button
             key={item.id}
+            data-nav-id={item.id}
             className={`sidebar-link ${active === item.id ? 'active' : ''}`}
             onClick={() => onChange(item.id)}
           >
