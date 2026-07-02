@@ -483,7 +483,7 @@ const AR_NAV: Record<string, ArNavTarget> = {
   sales_by_channel: { page: 'sales', where: 'Sales → Brand Mix' },
   sales_yoy: { page: 'sales', where: 'Sales → Overview' },
   segment: { page: 'sales', where: 'Sales (toggle Little Tree / Infused Origin)' },
-  sales_by_rep: { page: 'commission', where: 'Commission' },
+  sales_by_rep: { page: 'sales', where: 'Sales' },
   cooling_customers: { page: 'customers', where: 'Little Tree Customers → At-Risk' },
   data_quality: { page: 'collections', where: 'Little Tree AR → Reconciliation tab' },
   ar_briefing: { page: 'overview', where: 'Overview' },

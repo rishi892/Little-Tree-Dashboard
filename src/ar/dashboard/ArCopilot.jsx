@@ -154,7 +154,16 @@ export function ArCopilot() {
                     </div>
                     {m.nav && (
                       <button
-                        onClick={() => { navigate(m.nav.page); setOpen(false); }}
+                        onClick={() => {
+                          navigate(m.nav.page);
+                          setOpen(false);
+                          // Scroll the dashboard to the top so there's a visible
+                          // response even when the target page is the one already open.
+                          setTimeout(() => {
+                            document.querySelector('.dash-content')?.scrollTo({ top: 0, behavior: 'smooth' });
+                            window.scrollTo({ top: 0, behavior: 'smooth' });
+                          }, 60);
+                        }}
                         title={m.nav.where}
                         style={{ marginTop: 8, alignSelf: 'flex-start', fontSize: 12.5, fontWeight: 600, padding: '7px 12px', borderRadius: 999, border: 'none', background: 'linear-gradient(135deg, #1d4ed8, #3b82f6)', color: '#fff', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}
                       >
